@@ -28,18 +28,11 @@ import CoreStates::*;
 import GetPut::*;
 
 import Abstraction::*;
-import RVRFile::*;
-`ifdef CONFIG_U
-import RVCsrFile::*;
-`else
-import RVCsrFileMCU::*;
-`endif
 import RVExec::*;
 import RVTypes::*;
 
 import RVAlu::*;
 import RVControl::*;
-import RVDecode::*;
 import RVMemory::*;
 `ifdef CONFIG_M
 import RVMulDiv::*;
@@ -52,27 +45,15 @@ typedef struct {
     Reg#(Maybe#(FetchState)) fs;
     Reg#(Maybe#(ExecuteState)) es;
     Reg#(Maybe#(WriteBackState)) ws;
-    //Get#(Instruction) ifetchres;
     Put#(RVDMemReq) dmemreq;
 `ifdef CONFIG_M
     MulDivExec mulDiv;
 `endif
-`ifdef CONFIG_U
-    // If user mode is supported, use the full CSR File
-    RVCsrFile csrf;
-`else
-    // Otherwise use the M-only CSR File designed for MCUs
-    RVCsrFileMCU csrf;
-`endif
-    ArchRFile rf;
 } ExecRegs;
 
 module mkExecStage#(ExecRegs er)(ExecStage);
 
-    //let ifetchres = er.ifetchres;
     let dmemreq = er.dmemreq;
-    let csrf = er.csrf;
-    let rf = er.rf;
 `ifdef CONFIG_M
     let mulDiv = er.mulDiv;
 `endif
@@ -88,30 +69,8 @@ module mkExecStage#(ExecRegs er)(ExecStage);
         let rVal1 = executeState.rVal1;
         let rVal2 = executeState.rVal2;
         er.es <= tagged Invalid;
-
-        // get the instruction
-        //let inst <- ifetchres.get;
-
+        
         if (!poisoned) begin
-            // check for interrupts
-            //Maybe#(TrapCause) trap = tagged Invalid;
-            //if (csrf.readyInterrupt matches tagged Valid .validInterrupt) begin
-            //    trap = tagged Valid (tagged Interrupt validInterrupt);
-            //end
-
-            // decode the instruction
-            //let maybeDInst = decodeInst(inst);
-            //if (maybeDInst == tagged Invalid && trap == tagged Invalid) begin
-            //    trap = tagged Valid (tagged Exception IllegalInst);
-            //end
-            //let dInst = fromMaybe(?, maybeDInst);
-
-            //$display("[Execute] pc: 0x%0x, dInst: ", pc, fshow(dInst));
-
-            // read registers
-            //let rVal1 = rf.rd1(toFullRegIndex(dInst.rs1, getInstFields(inst).rs1));
-            //let rVal2 = rf.rd2(toFullRegIndex(dInst.rs2, getInstFields(inst).rs2));
-
             // execute instruction
             let execResult = basicExec(dInst, rVal1, rVal2, pc);
             let data = execResult.data;

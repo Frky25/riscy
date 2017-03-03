@@ -109,13 +109,11 @@ module mkThreeStageCore#(
         fs: fetchStateEhr[1],
         es: executeStateEhr[1],
         ws: writeBackStateEhr[1],
-        //ifetchres: ifetch.response,
         dmemreq: dmem.request,
 `ifdef CONFIG_M
-        mulDiv: mulDiv,
+        mulDiv: mulDiv
 `endif
-        csrf: csrf,
-        rf: rf};
+        };
     ExecStage e <- mkExecStage(execRegs); 
 
     let writeBackRegs = WriteBackRegs{ 
