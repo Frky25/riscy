@@ -38,6 +38,8 @@ import RVCsrFileMCU::*;
 import RVTypes::*;
 import VerificationPacket::*;
 
+import Scoreboard::*;
+
 import RVMemory::*;
 `ifdef CONFIG_M
 import RVMulDiv::*;
@@ -63,6 +65,7 @@ typedef struct {
     RVCsrFileMCU csrf;
 `endif
     ArchRFile rf;
+    Scoreboard#(4) sb;
     FIFO#(VerificationPacket) verificationPackets;
 } WriteBackRegs;
 
@@ -70,12 +73,14 @@ module mkWriteBackStage#(WriteBackRegs wr)(WriteBackStage);
     let dmemres = wr.dmemres;
     let csrf = wr.csrf;
     let rf = wr.rf;
+    let sb = wr.sb;
 `ifdef CONFIG_M
     let mulDiv = wr.mulDiv;
 `endif
 
     rule doWriteBack(wr.ws matches tagged Valid .writeBackState
                         &&& (writeBackState.dInst.execFunc != tagged System WFI || csrf.wakeFromWFI()));
+        let poisoned = writeBackState.poisoned;
         let pc = writeBackState.pc;
         let trap = writeBackState.trap;
         let dInst = writeBackState.dInst;
@@ -83,22 +88,23 @@ module mkWriteBackStage#(WriteBackRegs wr)(WriteBackStage);
         let addr = writeBackState.addr;
         let data = writeBackState.data;
         wr.ws <= tagged Invalid;
-        //$display("[WriteBack] pc: 0x%0x, dInst: ", pc, fshow(dInst));
+        if(!poisoned) begin
+            //$display("[WriteBack] pc: 0x%0x, dInst: ", pc, fshow(dInst));
 
 `ifdef CONFIG_M
-        if (dInst.execFunc matches tagged MulDiv .* &&& trap == tagged Invalid) begin
-            data = mulDiv.result_data;
-            mulDiv.result_deq;
-        end
+            if (dInst.execFunc matches tagged MulDiv .* &&& trap == tagged Invalid) begin
+                data = mulDiv.result_data;
+                mulDiv.result_deq;
+            end
 `endif
 
-        if (dInst.execFunc matches tagged Mem .memInst &&& trap == tagged Invalid) begin
-            if (getsResponse(memInst.op)) begin
-                data <- dmemres.get;
+            if (dInst.execFunc matches tagged Mem .memInst &&& trap == tagged Invalid) begin
+                if (getsResponse(memInst.op)) begin
+                    data <- dmemres.get;
+                end
             end
-        end
 
-        let csrfResult <- csrf.wr(
+            let csrfResult <- csrf.wr(
                 pc,
                 // performing system instructions
                 dInst.execFunc matches tagged System .sysInst ? tagged Valid sysInst : tagged Invalid,
@@ -112,40 +118,40 @@ module mkWriteBackStage#(WriteBackRegs wr)(WriteBackStage);
                 False,
                 False);
 
-        Maybe#(Addr) maybeNextPc = tagged Invalid;
-        Maybe#(Data) maybeData = tagged Invalid;
-        Maybe#(TrapCause) maybeTrap = tagged Invalid;
-        case (csrfResult) matches
-            tagged Exception .exc:
-                begin
-                    maybeNextPc = tagged Valid exc.trapHandlerPC;
-                    maybeTrap = tagged Valid exc.exception;
-                end
-            tagged RedirectPC .newPc:
-                maybeNextPc = tagged Valid newPc;
-            tagged CsrData .data:
-                maybeData = tagged Valid data;
-            tagged None:
-                noAction;
-        endcase
+            Maybe#(Addr) maybeNextPc = tagged Invalid;
+            Maybe#(Data) maybeData = tagged Invalid;
+            Maybe#(TrapCause) maybeTrap = tagged Invalid;
+            case (csrfResult) matches
+                tagged Exception .exc:
+                    begin
+                        maybeNextPc = tagged Valid exc.trapHandlerPC;
+                        maybeTrap = tagged Valid exc.exception;
+                    end
+                tagged RedirectPC .newPc:
+                    maybeNextPc = tagged Valid newPc;
+                tagged CsrData .csrdata:
+                    maybeData = tagged Valid csrdata;
+                tagged None:
+                    noAction;
+            endcase
 
-        // send verification packet
-        Bool isInterrupt = False;
-        Bool isException = False;
-        Bit#(4) trapCause = 0;
-        case (maybeTrap) matches
-            tagged Valid (tagged Interrupt .x):
-                begin
-                    isInterrupt = True;
-                    trapCause = pack(x);
-                end
-            tagged Valid (tagged Exception .x):
-                begin
-                    isException = True;
-                    trapCause = pack(x);
-                end
-        endcase
-        wr.verificationPackets.enq( VerificationPacket {
+            // send verification packet
+            Bool isInterrupt = False;
+            Bool isException = False;
+            Bit#(4) trapCause = 0;
+            case (maybeTrap) matches
+                tagged Valid (tagged Interrupt .x):
+                    begin
+                        isInterrupt = True;
+                        trapCause = pack(x);
+                    end
+                tagged Valid (tagged Exception .x):
+                    begin
+                        isException = True;
+                        trapCause = pack(x);
+                    end
+            endcase
+            wr.verificationPackets.enq( VerificationPacket {
                 skippedPackets: 0,
                 pc: signExtend(pc),
                 data: signExtend(fromMaybe(data, maybeData)),
@@ -156,27 +162,30 @@ module mkWriteBackStage#(WriteBackRegs wr)(WriteBackStage);
                 interrupt: isInterrupt,
                 cause: trapCause } );
 
-        if (maybeNextPc matches tagged Valid .replayPc) begin
-            // This instruction is not writing to the register file
-            // it is either an instruction that requires flushing the pipeline
-            // or it caused an exception
-            //$display("[WriteBack] Redirecting to pc: 0x%0x", replayPc);
-            wr.fs <= tagged Valid FetchState{ pc: replayPc };
-            // kill other instructions
-            if (wr.rs matches tagged Valid .validRegFetchState) begin
-                let vrs = validRegFetchState;
-                vrs.poisoned = True;
-                wr.rs <= tagged Valid vrs;
+            if (maybeNextPc matches tagged Valid .replayPc) begin
+                // This instruction is not writing to the register file
+                // it is either an instruction that requires flushing the pipeline
+                // or it caused an exception
+                //$display("[WriteBack] Redirecting to pc: 0x%0x", replayPc);
+                wr.fs <= tagged Valid FetchState{ pc: replayPc };
+                // kill other instructions
+                if (wr.rs matches tagged Valid .validRegFetchState) begin
+                    let vrs = validRegFetchState;
+                    vrs.poisoned = True;
+                    wr.rs <= tagged Valid vrs;
+                end
+                if (wr.es matches tagged Valid .validExecuteState) begin
+                    let ves = validExecuteState;
+                    ves.poisoned = True;
+                    wr.es <= tagged Valid ves;
+                end
+            end else begin
+                // This instruction retired
+                // write to the register file
+                rf.wr(toFullRegIndex(dInst.dst, getInstFields(inst).rd), fromMaybe(data, maybeData));
             end
-            if (wr.es matches tagged Valid .validExecuteState) begin
-                let ves = validExecuteState;
-                ves.poisoned = True;
-                wr.es <= tagged Valid ves;
-            end
-        end else begin
-            // This instruction retired
-            // write to the register file
-            rf.wr(toFullRegIndex(dInst.dst, getInstFields(inst).rd), fromMaybe(data, maybeData));
         end
+        //always clear scoreboard for bookkeeping
+        sb.remove;
     endrule
 endmodule

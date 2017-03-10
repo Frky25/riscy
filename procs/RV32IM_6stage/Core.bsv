@@ -49,6 +49,10 @@ import RVCsrFileMCU::*;
 import RVTypes::*;
 import VerificationPacket::*;
 
+import Btb::*;
+//import Bht::*;
+import Scoreboard::*;
+
 import RVMemory::*;
 `ifdef CONFIG_M
 import RVMulDiv::*;
@@ -69,6 +73,7 @@ module mkThreeStageCore#(
             Bool externalInterrupt,
             Data hartID
         )(Core);
+
     ArchRFile rf <- mkBypassArchRFile;
 `ifdef CONFIG_U
     // If user mode is supported, use the full CSR File
@@ -82,6 +87,11 @@ module mkThreeStageCore#(
     MulDivExec mulDiv <- mkBoothRoughMulDivExec;
 `endif
 
+    NextAddrPred btb <- mkBtb;
+//    DirPred bht <- mkBht;
+
+    Scoreboard#(4) sb <- mkBypassingScoreboard;
+
     Ehr#(5, Maybe#(FetchState)) fetchStateEhr <- mkEhr(tagged Invalid);
     Ehr#(5, Maybe#(RegFetchState)) regFetchStateEhr <- mkEhr(tagged Invalid);
     Ehr#(5, Maybe#(ExecuteState)) executeStateEhr <- mkEhr(tagged Invalid);
@@ -93,7 +103,8 @@ module mkThreeStageCore#(
     let fetchRegs = FetchRegs{
         fs: fetchStateEhr[3],
         rs: regFetchStateEhr[3],
-        ifetchreq: ifetch.request};
+        ifetchreq: ifetch.request,
+        btb: btb};
     FetchStage f <- mkFetchStage(fetchRegs);
 
     let regFetchRegs = RegFetchRegs{
@@ -101,19 +112,21 @@ module mkThreeStageCore#(
         es: executeStateEhr[2],
         ifetchres: ifetch.response,
         csrf: csrf,
-        rf: rf};
+        rf: rf,
+        sb: sb};
     RegFetchStage r <- mkRegFetchStage(regFetchRegs);
 
 
     let execRegs = ExecRegs{
         fs: fetchStateEhr[1],
+        rs: regFetchStateEhr[1],
         es: executeStateEhr[1],
         ws: writeBackStateEhr[1],
         dmemreq: dmem.request,
 `ifdef CONFIG_M
-        mulDiv: mulDiv
+        mulDiv: mulDiv,
 `endif
-        };
+        btb: btb};
     ExecStage e <- mkExecStage(execRegs); 
 
     let writeBackRegs = WriteBackRegs{ 
@@ -127,6 +140,7 @@ module mkThreeStageCore#(
 `endif
         csrf: csrf,
         rf: rf,
+        sb: sb,
         verificationPackets: verificationPackets};
     WriteBackStage w <- mkWriteBackStage(writeBackRegs);
 
@@ -135,6 +149,8 @@ module mkThreeStageCore#(
         regFetchStateEhr[4] <= tagged Invalid;
         executeStateEhr[4] <= tagged Invalid;
         writeBackStateEhr[4] <= tagged Invalid;
+        //$display("[Core] Starting Up");
+        sb.clear;
     endmethod
     method Action stop;
         fetchStateEhr[4] <= tagged Invalid;

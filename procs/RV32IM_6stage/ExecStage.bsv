@@ -38,17 +38,21 @@ import RVMemory::*;
 import RVMulDiv::*;
 `endif
 
+import Btb::*;
+
 interface ExecStage;
 endinterface
 
 typedef struct {
     Reg#(Maybe#(FetchState)) fs;
+    Reg#(Maybe#(RegFetchState)) rs;
     Reg#(Maybe#(ExecuteState)) es;
     Reg#(Maybe#(WriteBackState)) ws;
     Put#(RVDMemReq) dmemreq;
 `ifdef CONFIG_M
     MulDivExec mulDiv;
 `endif
+    NextAddrPred btb;
 } ExecRegs;
 
 module mkExecStage#(ExecRegs er)(ExecStage);
@@ -57,26 +61,30 @@ module mkExecStage#(ExecRegs er)(ExecStage);
 `ifdef CONFIG_M
     let mulDiv = er.mulDiv;
 `endif
-
+    let btb = er.btb;
 
     rule doExecute(er.es matches tagged Valid .executeState
                     &&& er.ws == tagged Invalid);
         // get and clear the execute state
         let poisoned = executeState.poisoned;
         let pc = executeState.pc;
+        let ppc = executeState.ppc;
         Maybe#(TrapCause) trap = executeState.trap;
         let dInst = executeState.dInst;
         let rVal1 = executeState.rVal1;
         let rVal2 = executeState.rVal2;
+        Data data = ?;
+        Addr addr = ?;
         er.es <= tagged Invalid;
         
         if (!poisoned) begin
             // execute instruction
             let execResult = basicExec(dInst, rVal1, rVal2, pc);
-            let data = execResult.data;
-            let addr = execResult.addr;
+            data = execResult.data;
+            addr = execResult.addr;
             let nextPc = execResult.nextPc;
 
+            //$display("[Exec] pc: 0x%0x, dInst: ", pc, fshow(dInst));
             // check for next address alignment
             if (nextPc[1:0] != 0 && trap == tagged Invalid) begin
                 trap = tagged Valid (tagged Exception InstAddrMisaligned);
@@ -114,18 +122,31 @@ module mkExecStage#(ExecRegs er)(ExecStage);
                 end
             end
 
-            // update next pc for fetch stage if no trap
+            // update next pc for fetch stage if no trap and misprediction
             if (trap == tagged Invalid) begin
-                er.fs <= tagged Valid FetchState{ pc: nextPc };
+                if(nextPc != ppc) begin //misprediction
+                    //kill invalid instruction in reg fetch
+                    if(er.rs matches tagged Valid .validRegFetchState) begin
+                        let vrs = validRegFetchState;
+                        vrs.poisoned = True;
+                        er.rs <= tagged Valid vrs;
+                    end
+                    //update BTB
+                    btb.update(pc, nextPc, pc+4 != nextPc);
+                    //correct pc    
+                    er.fs <= tagged Valid FetchState{ pc: nextPc };
+                end
             end
-            // store things for next stage
-            er.ws <= tagged Valid WriteBackState{
-                                                        pc: pc,
-                                                        trap: trap,
-                                                        dInst: dInst,
-                                                        addr: addr,
-                                                        data: data
-                                                    };
         end
+        
+        //always store things for next stage because of bookkeeping
+        er.ws <= tagged Valid WriteBackState{
+                                            poisoned: poisoned,
+                                            pc: pc,
+                                            trap: trap,
+                                            dInst: dInst,
+                                            addr: addr,
+                                            data: data
+                                            };
     endrule
 endmodule

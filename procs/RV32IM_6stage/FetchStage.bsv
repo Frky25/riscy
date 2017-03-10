@@ -24,6 +24,7 @@
 import RVTypes::*;
 import CoreStates::*;
 import GetPut::*;
+import Btb::*;
 
 interface FetchStage;
 endinterface
@@ -32,21 +33,27 @@ typedef struct {
     Reg#(Maybe#(FetchState)) fs;
     Reg#(Maybe#(RegFetchState)) rs;
     Put#(Addr) ifetchreq;
+    NextAddrPred btb;
 } FetchRegs;
 
 module mkFetchStage#(FetchRegs fr)(FetchStage);
     let ifetchreq = fr.ifetchreq;
+    let btb = fr.btb;
 
     rule doFetch(fr.fs matches tagged Valid .fetchState
                     &&& fr.rs == tagged Invalid);
         // get and clear the fetch state
         let pc = fetchState.pc;
-        fr.fs <= tagged Invalid;
+        let ppc = btb.predPc(pc);
+        //fr.fs <= tagged Invalid;
         //$display("[Fetch] pc: 0x%0x", pc);
         // request instruction
         ifetchreq.put(pc);
 
+        // update pc
+        fr.fs <= tagged Valid FetchState{pc: ppc};
+
         // pass to execute state
-        fr.rs <= tagged Valid RegFetchState{ poisoned: False, pc: pc };
+        fr.rs <= tagged Valid RegFetchState{ poisoned: False, pc: pc, ppc: ppc};
     endrule
 endmodule

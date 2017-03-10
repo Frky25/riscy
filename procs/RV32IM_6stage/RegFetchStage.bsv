@@ -35,6 +35,9 @@ import RVCsrFileMCU::*;
 `endif
 import RVTypes::*;
 
+import Bht::*;
+import Scoreboard::*;
+
 import RVDecode::*;
 
 interface RegFetchStage;
@@ -52,6 +55,8 @@ typedef struct {
     RVCsrFileMCU csrf;
 `endif
     ArchRFile rf;
+    Scoreboard#(4) sb;
+//    DirPred bht;
 }RegFetchRegs;
 
 module mkRegFetchStage#(RegFetchRegs rr)(RegFetchStage);
@@ -59,16 +64,24 @@ module mkRegFetchStage#(RegFetchRegs rr)(RegFetchStage);
     let ifetchres = rr.ifetchres;
     let csrf = rr.csrf;
     let rf = rr.rf;
+    let sb = rr.sb;
+
+    Reg#(Maybe#(Instruction)) stallInst <- mkReg(tagged Invalid);
 
     rule doRegFetch(rr.rs matches tagged Valid .regFetchState
                     &&& rr.es == tagged Invalid);
         // get and clear the execute state
         let poisoned = regFetchState.poisoned;
         let pc = regFetchState.pc;
-        rr.rs <= tagged Invalid;
+        let ppc = regFetchState.ppc;
+        Instruction inst;
 
         // get the instruction
-        let inst <- ifetchres.get;
+        if(stallInst matches tagged Valid .instruction) begin
+            inst = instruction;
+        end else begin
+            inst <- ifetchres.get;
+        end
 
         if (!poisoned) begin
             // check for interrupts
@@ -83,20 +96,37 @@ module mkRegFetchStage#(RegFetchRegs rr)(RegFetchStage);
                 trap = tagged Valid (tagged Exception IllegalInst);
             end
             let dInst = fromMaybe(?, maybeDInst);
-
-            //$display("[RegFetch] pc: 0x%0x, inst: 0x%0x, dInst: ", pc, inst, fshow(dInst));
-
-            // read registers
-            let rVal1 = rf.rd1(toFullRegIndex(dInst.rs1, getInstFields(inst).rs1));
-            let rVal2 = rf.rd2(toFullRegIndex(dInst.rs2, getInstFields(inst).rs2));
-            rr.es <= tagged Valid ExecuteState{
-                poisoned: False,
-                pc: pc,
-                trap: trap,
-                dInst: dInst,
-                rVal1: rVal1,
-                rVal2: rVal2
-                };
+            
+            //check scoreboard for stall
+            let rf1 = toFullRegIndex(dInst.rs1, getInstFields(inst).rs1);
+            let rf2 = toFullRegIndex(dInst.rs2, getInstFields(inst).rs2);
+            if(!sb.search1(rf1) && !sb.search2(rf2)) begin 
+                //$display("[RegFetch] pc: 0x%0x, inst: 0x%0x, dInst: ", pc, inst, fshow(dInst));
+                // read registers
+                let rVal1 = rf.rd1(rf1);
+                let rVal2 = rf.rd2(rf2);
+                //only clear if not stalled
+                rr.rs <= tagged Invalid;
+                stallInst <= tagged Invalid;
+                //update scoreboard
+                sb.insert(toFullRegIndex(dInst.dst, getInstFields(inst).rd));
+                //send to execute
+                rr.es <= tagged Valid ExecuteState{
+                    poisoned: False,
+                    pc: pc,
+                    ppc: ppc,
+                    trap: trap,
+                    dInst: dInst,
+                    rVal1: rVal1,
+                    rVal2: rVal2
+                    };
+            end else begin
+                //$display("[RegFetch] pc: 0x%0x, stalling", pc);
+                stallInst <= tagged Valid inst;
+            end
+        end else begin //poisoned -> kill the instruction
+            //$display("[RegFetch] pc: 0x%0x, killing", pc);
+            rr.rs <= tagged Invalid;
         end
     endrule
 endmodule
