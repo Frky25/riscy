@@ -50,6 +50,7 @@ endinterface
 
 typedef struct {
     Reg#(Maybe#(FetchState)) fs;
+    Reg#(Maybe#(DecodeState)) ds;
     Reg#(Maybe#(RegFetchState)) rs;
     Reg#(Maybe#(ExecuteState)) es;
     Reg#(Maybe#(WriteBackState)) ws;
@@ -169,6 +170,11 @@ module mkWriteBackStage#(WriteBackRegs wr)(WriteBackStage);
                 //$display("[WriteBack] Redirecting to pc: 0x%0x", replayPc);
                 wr.fs <= tagged Valid FetchState{ pc: replayPc };
                 // kill other instructions
+                if (wr.ds matches tagged Valid .validDecodeState) begin
+                    let vds = validDecodeState;
+                    vds.poisoned = True;
+                    wr.ds <= tagged Valid vds;
+                end
                 if (wr.rs matches tagged Valid .validRegFetchState) begin
                     let vrs = validRegFetchState;
                     vrs.poisoned = True;

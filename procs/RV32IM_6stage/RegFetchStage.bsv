@@ -21,24 +21,24 @@
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-`include "ProcConfig.bsv"
+//`include "ProcConfig.bsv"
 
 import CoreStates::*;
 
 import GetPut::*;
 
 import RVRFile::*;
-`ifdef CONFIG_U
-import RVCsrFile::*;
-`else
-import RVCsrFileMCU::*;
-`endif
+//`ifdef CONFIG_U
+//import RVCsrFile::*;
+//`else
+//import RVCsrFileMCU::*;
+//`endif
 import RVTypes::*;
 
 import Bht::*;
 import Scoreboard::*;
 
-import RVDecode::*;
+//import RVDecode::*;
 
 interface RegFetchStage;
 endinterface
@@ -46,14 +46,14 @@ endinterface
 typedef struct {
     Reg#(Maybe#(RegFetchState)) rs;
     Reg#(Maybe#(ExecuteState)) es;
-    Get#(Instruction) ifetchres;
-`ifdef CONFIG_U
+//    Get#(Instruction) ifetchres;
+//`ifdef CONFIG_U
     // If user mode is supported, use the full CSR File
-    RVCsrFile csrf;
-`else
+//    RVCsrFile csrf;
+//`else
     // Otherwise use the M-only CSR File designed for MCUs
-    RVCsrFileMCU csrf;
-`endif
+//    RVCsrFileMCU csrf;
+//`endif
     ArchRFile rf;
     Scoreboard#(4) sb;
 //    DirPred bht;
@@ -61,10 +61,11 @@ typedef struct {
 
 module mkRegFetchStage#(RegFetchRegs rr)(RegFetchStage);
 
-    let ifetchres = rr.ifetchres;
-    let csrf = rr.csrf;
+//    let ifetchres = rr.ifetchres;
+//    let csrf = rr.csrf;
     let rf = rr.rf;
     let sb = rr.sb;
+//    let bht = rr.bht;
 
     Reg#(Maybe#(Instruction)) stallInst <- mkReg(tagged Invalid);
 
@@ -74,28 +75,31 @@ module mkRegFetchStage#(RegFetchRegs rr)(RegFetchStage);
         let poisoned = regFetchState.poisoned;
         let pc = regFetchState.pc;
         let ppc = regFetchState.ppc;
-        Instruction inst;
+        let trap = regFetchState.trap;
+        let inst = regFetchState.inst;
+        let dInst = regFetchState.dInst;
+        //Instruction inst;
 
         // get the instruction
-        if(stallInst matches tagged Valid .instruction) begin
-            inst = instruction;
-        end else begin
-            inst <- ifetchres.get;
-        end
+        //if(stallInst matches tagged Valid .instruction) begin
+        //    inst = instruction;
+        //end else begin
+        //    inst <- ifetchres.get;
+        //end
 
         if (!poisoned) begin
             // check for interrupts
-            Maybe#(TrapCause) trap = tagged Invalid;
-            if (csrf.readyInterrupt matches tagged Valid .validInterrupt) begin
-                trap = tagged Valid (tagged Interrupt validInterrupt);
-            end
+//            Maybe#(TrapCause) trap = tagged Invalid;
+//            if (csrf.readyInterrupt matches tagged Valid .validInterrupt) begin
+//                trap = tagged Valid (tagged Interrupt validInterrupt);
+//            end
 
             // decode the instruction
-            let maybeDInst = decodeInst(inst);
-            if (maybeDInst == tagged Invalid && trap == tagged Invalid) begin
-                trap = tagged Valid (tagged Exception IllegalInst);
-            end
-            let dInst = fromMaybe(?, maybeDInst);
+//            let maybeDInst = decodeInst(inst);
+//            if (maybeDInst == tagged Invalid && trap == tagged Invalid) begin
+//                trap = tagged Valid (tagged Exception IllegalInst);
+//            end
+//            let dInst = fromMaybe(?, maybeDInst);
             
             //check scoreboard for stall
             let rf1 = toFullRegIndex(dInst.rs1, getInstFields(inst).rs1);
@@ -120,10 +124,10 @@ module mkRegFetchStage#(RegFetchRegs rr)(RegFetchStage);
                     rVal1: rVal1,
                     rVal2: rVal2
                     };
-            end else begin
+            end// else begin
                 //$display("[RegFetch] pc: 0x%0x, stalling", pc);
-                stallInst <= tagged Valid inst;
-            end
+//                stallInst <= tagged Valid inst;
+//            end
         end else begin //poisoned -> kill the instruction
             //$display("[RegFetch] pc: 0x%0x, killing", pc);
             rr.rs <= tagged Invalid;

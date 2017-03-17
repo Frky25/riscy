@@ -20,28 +20,51 @@
 // ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 // CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
+`include "ProcConfig.bsv"
 
 import RVTypes::*;
 import CoreStates::*;
 import GetPut::*;
 import Btb::*;
 
+`ifdef CONFIG_U
+import RVCsrFile::*;
+`else
+import RVCsrFileMCU::*;
+`endif
+import RVDecode::*;
+
 interface FetchStage;
 endinterface
 
 typedef struct {
     Reg#(Maybe#(FetchState)) fs;
-    Reg#(Maybe#(RegFetchState)) rs;
+    Reg#(Maybe#(DecodeState)) ds;
     Put#(Addr) ifetchreq;
     NextAddrPred btb;
 } FetchRegs;
 
-module mkFetchStage#(FetchRegs fr)(FetchStage);
+typedef struct {
+    Reg#(Maybe#(DecodeState)) ds;
+    Reg#(Maybe#(RegFetchState)) rs;
+    Get#(Instruction) ifetchres;
+`ifdef CONFIG_U
+    // If user mode is supported, use the full CSR File
+    RVCsrFile csrf;
+`else
+    // Otherwise use the M-only CSR File designed for MCUs
+    RVCsrFileMCU csrf;
+`endif
+//    DirPred bht;
+} DecodeRegs;
+
+
+module mkFetchStage#(FetchRegs fr, DecodeRegs dr)(FetchStage);
     let ifetchreq = fr.ifetchreq;
     let btb = fr.btb;
 
     rule doFetch(fr.fs matches tagged Valid .fetchState
-                    &&& fr.rs == tagged Invalid);
+                    &&& fr.ds == tagged Invalid);
         // get and clear the fetch state
         let pc = fetchState.pc;
         let ppc = btb.predPc(pc);
@@ -54,6 +77,44 @@ module mkFetchStage#(FetchRegs fr)(FetchStage);
         fr.fs <= tagged Valid FetchState{pc: ppc};
 
         // pass to execute state
-        fr.rs <= tagged Valid RegFetchState{ poisoned: False, pc: pc, ppc: ppc};
+        fr.ds <= tagged Valid DecodeState{ poisoned: False, pc: pc, ppc: ppc};
+    endrule
+
+    let ifetchres = dr.ifetchres;
+    let csrf = dr.csrf;
+
+    rule doDecode(dr.ds matches tagged Valid .decodeState
+                    &&& dr.rs == tagged Invalid);
+
+        // get and clear the execute state
+        let poisoned = decodeState.poisoned;
+        let pc = decodeState.pc;
+        let ppc = decodeState.ppc;
+
+        Instruction inst <- ifetchres.get;
+        dr.ds <= tagged Invalid;
+
+        if (!poisoned) begin
+            // check for interrupts
+            Maybe#(TrapCause) trap = tagged Invalid;
+            if (csrf.readyInterrupt matches tagged Valid .validInterrupt) begin
+                trap = tagged Valid (tagged Interrupt validInterrupt);
+            end
+
+            // decode the instruction
+            let maybeDInst = decodeInst(inst);
+            if (maybeDInst == tagged Invalid && trap == tagged Invalid) begin
+                trap = tagged Valid (tagged Exception IllegalInst);
+            end
+            let dInst = fromMaybe(?, maybeDInst);
+            //Branch prediction here
+            dr.rs <= tagged Valid RegFetchState{
+                        poisoned: poisoned,
+                        pc: pc,
+                        ppc: ppc,
+                        trap: trap,
+                        inst: inst,
+                        dInst: dInst};
+        end
     endrule
 endmodule

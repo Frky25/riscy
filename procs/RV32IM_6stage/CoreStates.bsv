@@ -31,6 +31,15 @@ typedef struct {
     Bool poisoned;
     Addr pc;
     Addr ppc;
+} DecodeState deriving (Bits, Eq, FShow);
+
+typedef struct {
+    Bool              poisoned;
+    Addr              pc;
+    Addr              ppc;
+    Maybe#(TrapCause) trap;
+    Instruction       inst;
+    RVDecodedInst     dInst;
 } RegFetchState deriving (Bits, Eq, FShow);
 
 typedef struct {

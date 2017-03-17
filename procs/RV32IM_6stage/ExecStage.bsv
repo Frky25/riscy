@@ -45,6 +45,7 @@ endinterface
 
 typedef struct {
     Reg#(Maybe#(FetchState)) fs;
+    Reg#(Maybe#(DecodeState)) ds;
     Reg#(Maybe#(RegFetchState)) rs;
     Reg#(Maybe#(ExecuteState)) es;
     Reg#(Maybe#(WriteBackState)) ws;
@@ -125,7 +126,12 @@ module mkExecStage#(ExecRegs er)(ExecStage);
             // update next pc for fetch stage if no trap and misprediction
             if (trap == tagged Invalid) begin
                 if(nextPc != ppc) begin //misprediction
-                    //kill invalid instruction in reg fetch
+                    //kill invalid instructions
+                    if(er.ds matches tagged Valid .validDecodeState) begin
+                        let vds = validDecodeState;
+                        vds.poisoned = True;
+                        er.ds <= tagged Valid vds;
+                    end
                     if(er.rs matches tagged Valid .validRegFetchState) begin
                         let vrs = validRegFetchState;
                         vrs.poisoned = True;

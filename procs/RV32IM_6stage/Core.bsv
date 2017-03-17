@@ -92,33 +92,41 @@ module mkThreeStageCore#(
 
     Scoreboard#(4) sb <- mkBypassingScoreboard;
 
-    Ehr#(5, Maybe#(FetchState)) fetchStateEhr <- mkEhr(tagged Invalid);
-    Ehr#(5, Maybe#(RegFetchState)) regFetchStateEhr <- mkEhr(tagged Invalid);
-    Ehr#(5, Maybe#(ExecuteState)) executeStateEhr <- mkEhr(tagged Invalid);
-    Ehr#(5, Maybe#(WriteBackState)) writeBackStateEhr <- mkEhr(tagged Invalid);
-    Ehr#(5, Bool) epoch <- mkEhr(False);
+    Ehr#(6, Maybe#(FetchState)) fetchStateEhr <- mkEhr(tagged Invalid);
+    Ehr#(6, Maybe#(DecodeState)) decodeStateEhr <- mkEhr(tagged Invalid);
+    Ehr#(6, Maybe#(RegFetchState)) regFetchStateEhr <- mkEhr(tagged Invalid);
+    Ehr#(6, Maybe#(ExecuteState)) executeStateEhr <- mkEhr(tagged Invalid);
+    Ehr#(6, Maybe#(WriteBackState)) writeBackStateEhr <- mkEhr(tagged Invalid);
+    //Ehr#(6, Bool) epoch <- mkEhr(False);
 
     FIFO#(VerificationPacket) verificationPackets <- mkFIFO;
     
     let fetchRegs = FetchRegs{
-        fs: fetchStateEhr[3],
-        rs: regFetchStateEhr[3],
+        fs: fetchStateEhr[4],
+        ds: decodeStateEhr[4],
         ifetchreq: ifetch.request,
         btb: btb};
-    FetchStage f <- mkFetchStage(fetchRegs);
+    let decodeRegs = DecodeRegs{
+        ds: decodeStateEhr[3],
+        rs: regFetchStateEhr[3],
+        ifetchres: ifetch.response,
+        csrf: csrf};
+
+    FetchStage f <- mkFetchStage(fetchRegs,decodeRegs);
 
     let regFetchRegs = RegFetchRegs{
         rs: regFetchStateEhr[2],
         es: executeStateEhr[2],
-        ifetchres: ifetch.response,
-        csrf: csrf,
+//        csrf: csrf,
         rf: rf,
         sb: sb};
+//        bht: bht};
     RegFetchStage r <- mkRegFetchStage(regFetchRegs);
 
 
     let execRegs = ExecRegs{
         fs: fetchStateEhr[1],
+        ds: decodeStateEhr[1],
         rs: regFetchStateEhr[1],
         es: executeStateEhr[1],
         ws: writeBackStateEhr[1],
@@ -131,6 +139,7 @@ module mkThreeStageCore#(
 
     let writeBackRegs = WriteBackRegs{ 
         fs: fetchStateEhr[0],
+        ds: decodeStateEhr[0],
         rs: regFetchStateEhr[0],
         es: executeStateEhr[0],
         ws: writeBackStateEhr[0],
@@ -145,18 +154,18 @@ module mkThreeStageCore#(
     WriteBackStage w <- mkWriteBackStage(writeBackRegs);
 
     method Action start(Addr startPc);
-        fetchStateEhr[4] <= tagged Valid FetchState { pc: startPc };
-        regFetchStateEhr[4] <= tagged Invalid;
-        executeStateEhr[4] <= tagged Invalid;
-        writeBackStateEhr[4] <= tagged Invalid;
+        fetchStateEhr[5] <= tagged Valid FetchState { pc: startPc };
+        regFetchStateEhr[5] <= tagged Invalid;
+        executeStateEhr[5] <= tagged Invalid;
+        writeBackStateEhr[5] <= tagged Invalid;
         //$display("[Core] Starting Up");
         sb.clear;
     endmethod
     method Action stop;
-        fetchStateEhr[4] <= tagged Invalid;
-        regFetchStateEhr[4] <= tagged Invalid;
-        executeStateEhr[4] <= tagged Invalid;
-        writeBackStateEhr[4] <= tagged Invalid;
+        fetchStateEhr[5] <= tagged Invalid;
+        regFetchStateEhr[5] <= tagged Invalid;
+        executeStateEhr[5] <= tagged Invalid;
+        writeBackStateEhr[5] <= tagged Invalid;
     endmethod
 
     method ActionValue#(VerificationPacket) getVerificationPacket;
