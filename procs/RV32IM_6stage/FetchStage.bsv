@@ -26,6 +26,7 @@ import RVTypes::*;
 import CoreStates::*;
 import GetPut::*;
 import Btb::*;
+import Bht::*;
 
 `ifdef CONFIG_U
 import RVCsrFile::*;
@@ -45,6 +46,7 @@ typedef struct {
 } FetchRegs;
 
 typedef struct {
+    Reg#(Maybe#(FetchState)) fs;
     Reg#(Maybe#(DecodeState)) ds;
     Reg#(Maybe#(RegFetchState)) rs;
     Get#(Instruction) ifetchres;
@@ -55,7 +57,7 @@ typedef struct {
     // Otherwise use the M-only CSR File designed for MCUs
     RVCsrFileMCU csrf;
 `endif
-//    DirPred bht;
+    DirPred bht;
 } DecodeRegs;
 
 
@@ -82,6 +84,7 @@ module mkFetchStage#(FetchRegs fr, DecodeRegs dr)(FetchStage);
 
     let ifetchres = dr.ifetchres;
     let csrf = dr.csrf;
+    let bht = dr.bht;
 
     rule doDecode(dr.ds matches tagged Valid .decodeState
                     &&& dr.rs == tagged Invalid);
@@ -107,7 +110,33 @@ module mkFetchStage#(FetchRegs fr, DecodeRegs dr)(FetchStage);
                 trap = tagged Valid (tagged Exception IllegalInst);
             end
             let dInst = fromMaybe(?, maybeDInst);
-            //Branch prediction here
+            
+            if (dInst.execFunc matches tagged Br .br) begin
+                if(br != Jal && br != Jalr) begin
+                    let pred = bht.dirPred(pc);
+                    Addr bppc = 0;
+                    if(pred) begin
+                        let imm = fromMaybe(?,getImmediate(dInst.imm, dInst.inst));
+                        bppc = pc + signExtend(imm);
+                    end else begin
+                        bppc = pc + 4;
+                    end
+                    
+                    if(bppc != ppc) begin
+                        dr.fs <= tagged Valid FetchState{ pc: bppc };
+                        ppc = bppc;
+                    end
+                end
+                if(br == Jal) begin
+                    let imm = fromMaybe(?,getImmediate(dInst.imm, dInst.inst));
+                    Addr jppc = pc + signExtend(imm);
+                    if(jppc != ppc) begin
+                        dr.fs <= tagged Valid FetchState{ pc: jppc };
+                        ppc = jppc;
+                    end
+                end
+            end
+
             dr.rs <= tagged Valid RegFetchState{
                         poisoned: poisoned,
                         pc: pc,

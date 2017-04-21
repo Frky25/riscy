@@ -122,6 +122,12 @@ module mkWriteBackStage#(WriteBackRegs wr)(WriteBackStage);
             Maybe#(Addr) maybeNextPc = tagged Invalid;
             Maybe#(Data) maybeData = tagged Invalid;
             Maybe#(TrapCause) maybeTrap = tagged Invalid;
+
+            if (dInst.execFunc matches tagged Fence .fInst) begin
+                Addr newPc = pc+4;
+                maybeNextPc = tagged Valid newPc;
+            end
+
             case (csrfResult) matches
                 tagged Exception .exc:
                     begin

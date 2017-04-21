@@ -50,7 +50,7 @@ import RVTypes::*;
 import VerificationPacket::*;
 
 import Btb::*;
-//import Bht::*;
+import Bht::*;
 import Scoreboard::*;
 
 import RVMemory::*;
@@ -88,7 +88,7 @@ module mkThreeStageCore#(
 `endif
 
     NextAddrPred btb <- mkBtb;
-//    DirPred bht <- mkBht;
+    DirPred bht <- mkBht;
 
     Scoreboard#(4) sb <- mkBypassingScoreboard;
 
@@ -107,20 +107,20 @@ module mkThreeStageCore#(
         ifetchreq: ifetch.request,
         btb: btb};
     let decodeRegs = DecodeRegs{
+        fs: fetchStateEhr[3],
         ds: decodeStateEhr[3],
         rs: regFetchStateEhr[3],
         ifetchres: ifetch.response,
-        csrf: csrf};
+        csrf: csrf,
+        bht: bht};
 
     FetchStage f <- mkFetchStage(fetchRegs,decodeRegs);
 
     let regFetchRegs = RegFetchRegs{
         rs: regFetchStateEhr[2],
         es: executeStateEhr[2],
-//        csrf: csrf,
         rf: rf,
         sb: sb};
-//        bht: bht};
     RegFetchStage r <- mkRegFetchStage(regFetchRegs);
 
 
@@ -134,7 +134,8 @@ module mkThreeStageCore#(
 `ifdef CONFIG_M
         mulDiv: mulDiv,
 `endif
-        btb: btb};
+        btb: btb,
+        bht: bht};
     ExecStage e <- mkExecStage(execRegs); 
 
     let writeBackRegs = WriteBackRegs{ 

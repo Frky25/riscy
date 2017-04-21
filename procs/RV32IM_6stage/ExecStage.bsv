@@ -39,6 +39,7 @@ import RVMulDiv::*;
 `endif
 
 import Btb::*;
+import Bht::*;
 
 interface ExecStage;
 endinterface
@@ -54,6 +55,7 @@ typedef struct {
     MulDivExec mulDiv;
 `endif
     NextAddrPred btb;
+    DirPred bht;
 } ExecRegs;
 
 module mkExecStage#(ExecRegs er)(ExecStage);
@@ -63,6 +65,8 @@ module mkExecStage#(ExecRegs er)(ExecStage);
     let mulDiv = er.mulDiv;
 `endif
     let btb = er.btb;
+    let bht = er.bht;
+
 
     rule doExecute(er.es matches tagged Valid .executeState
                     &&& er.ws == tagged Invalid);
@@ -84,6 +88,9 @@ module mkExecStage#(ExecRegs er)(ExecStage);
             data = execResult.data;
             addr = execResult.addr;
             let nextPc = execResult.nextPc;
+            let taken = execResult.taken;
+            //Update BHT
+            bht.update(pc, taken);
 
             //$display("[Exec] pc: 0x%0x, dInst: ", pc, fshow(dInst));
             // check for next address alignment

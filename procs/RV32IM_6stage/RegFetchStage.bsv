@@ -78,29 +78,8 @@ module mkRegFetchStage#(RegFetchRegs rr)(RegFetchStage);
         let trap = regFetchState.trap;
         let inst = regFetchState.inst;
         let dInst = regFetchState.dInst;
-        //Instruction inst;
-
-        // get the instruction
-        //if(stallInst matches tagged Valid .instruction) begin
-        //    inst = instruction;
-        //end else begin
-        //    inst <- ifetchres.get;
-        //end
-
+        
         if (!poisoned) begin
-            // check for interrupts
-//            Maybe#(TrapCause) trap = tagged Invalid;
-//            if (csrf.readyInterrupt matches tagged Valid .validInterrupt) begin
-//                trap = tagged Valid (tagged Interrupt validInterrupt);
-//            end
-
-            // decode the instruction
-//            let maybeDInst = decodeInst(inst);
-//            if (maybeDInst == tagged Invalid && trap == tagged Invalid) begin
-//                trap = tagged Valid (tagged Exception IllegalInst);
-//            end
-//            let dInst = fromMaybe(?, maybeDInst);
-            
             //check scoreboard for stall
             let rf1 = toFullRegIndex(dInst.rs1, getInstFields(inst).rs1);
             let rf2 = toFullRegIndex(dInst.rs2, getInstFields(inst).rs2);
@@ -124,10 +103,7 @@ module mkRegFetchStage#(RegFetchRegs rr)(RegFetchStage);
                     rVal1: rVal1,
                     rVal2: rVal2
                     };
-            end// else begin
-                //$display("[RegFetch] pc: 0x%0x, stalling", pc);
-//                stallInst <= tagged Valid inst;
-//            end
+            end
         end else begin //poisoned -> kill the instruction
             //$display("[RegFetch] pc: 0x%0x, killing", pc);
             rr.rs <= tagged Invalid;
