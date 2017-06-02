@@ -23,12 +23,14 @@
 
 `include "ProcConfig.bsv"
 
-import CoreStates::*;
-
+import DefaultValue::*;
 import GetPut::*;
 
+import MemUtil::*;
+import Port::*;
+
 import Abstraction::*;
-import RVRFile::*;
+import RVRegFile::*;
 `ifdef CONFIG_U
 import RVCsrFile::*;
 `else
@@ -45,29 +47,26 @@ import RVMemory::*;
 import RVMulDiv::*;
 `endif
 
+import CoreStates::*;
+
 interface ExecStage;
 endinterface
 
 typedef struct {
-    Reg#(Maybe#(FetchState)) fs;
-    Reg#(Maybe#(ExecuteState)) es;
-    Reg#(Maybe#(WriteBackState)) ws;
-    Get#(Instruction) ifetchres;
-    Put#(RVDMemReq) dmemreq;
+    Reg#(Maybe#(FetchState#(xlen))) fs;
+    Reg#(Maybe#(ExecuteState#(xlen))) es;
+    Reg#(Maybe#(WriteBackState#(xlen))) ws;
+    OutputPort#(ReadOnlyMemResp#(2)) ifetchres;
+    InputPort#(AtomicMemReq#(32,2)) dmemreq;
+    // InputPort#(RVDMemReq) dmemreq;
 `ifdef CONFIG_M
-    MulDivExec mulDiv;
+    MulDivExec#(xlen) mulDiv;
 `endif
-`ifdef CONFIG_U
-    // If user mode is supported, use the full CSR File
-    RVCsrFile csrf;
-`else
-    // Otherwise use the M-only CSR File designed for MCUs
-    RVCsrFileMCU csrf;
-`endif
-    ArchRFile rf;
-} ExecRegs;
+    RVCsrFile#(xlen) csrf;
+    RVRegFile#(xlen) rf;
+} ExecRegs#(numeric type xlen);
 
-module mkExecStage#(ExecRegs er)(ExecStage);
+module mkExecStage#(ExecRegs#(xlen) er)(ExecStage) provisos (NumAlias#(xlen, 32));
 
     let ifetchres = er.ifetchres;
     let dmemreq = er.dmemreq;
@@ -77,7 +76,6 @@ module mkExecStage#(ExecRegs er)(ExecStage);
     let mulDiv = er.mulDiv;
 `endif
 
-
     rule doExecute(er.es matches tagged Valid .executeState
                     &&& er.ws == tagged Invalid);
         // get and clear the execute state
@@ -86,7 +84,8 @@ module mkExecStage#(ExecRegs er)(ExecStage);
         er.es <= tagged Invalid;
 
         // get the instruction
-        let inst <- ifetchres.get;
+        let inst = ifetchres.first.data;
+        ifetchres.deq;
 
         if (!poisoned) begin
             // check for interrupts
@@ -96,7 +95,8 @@ module mkExecStage#(ExecRegs er)(ExecStage);
             end
 
             // decode the instruction
-            let maybeDInst = decodeInst(inst);
+            RiscVISASubset misa = defaultValue;
+            let maybeDInst = decodeInst(misa.rv64, misa.m, misa.a, misa.f, misa.d, inst);
             if (maybeDInst == tagged Invalid && trap == tagged Invalid) begin
                 trap = tagged Valid (tagged Exception IllegalInst);
             end
@@ -135,12 +135,26 @@ module mkExecStage#(ExecRegs er)(ExecStage);
                                 endcase);
                 if (aligned) begin
                     // send the request to the memory
-                    dmemreq.put( RVDMemReq {
-                        op: dInst.execFunc.Mem.op,
-                        size: dInst.execFunc.Mem.size,
-                        isUnsigned: dInst.execFunc.Mem.isUnsigned,
-                        addr: zeroExtend(addr),
-                        data: data } );
+                    // dmemreq.enq( RVDMemReq {
+                    //     op: dInst.execFunc.Mem.op,
+                    //     size: dInst.execFunc.Mem.size,
+                    //     isUnsigned: dInst.execFunc.Mem.isUnsigned,
+                    //     addr: zeroExtend(addr),
+                    //     data: data } );
+
+                    //// This assumes xlen == 32
+                    Bit#(32) aligned_data = data << {addr[1:0], 3'b0};
+                    Bit#(4) write_en = dInst.execFunc.Mem.op == tagged Mem Ld ? 0 : 
+                                        (case(memInst.size)
+                                            B: ('b0001 << addr[1:0]);
+                                            H: ('b0011 << addr[1:0]);
+                                            W: ('b1111);
+                                        endcase);
+                    dmemreq.enq( AtomicMemReq {
+                        write_en: write_en,
+                        atomic_op: None,
+                        addr: addr,
+                        data: aligned_data} );
                 end else begin
                     // misaligned address exception
                     if ((memInst.op == tagged Mem Ld) || (memInst.op == tagged Mem Lr)) begin

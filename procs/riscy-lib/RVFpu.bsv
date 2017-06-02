@@ -1,5 +1,5 @@
 
-// Copyright (c) 2016 Massachusetts Institute of Technology
+// Copyright (c) 2016, 2017 Massachusetts Institute of Technology
 
 // Permission is hereby granted, free of charge, to any person
 // obtaining a copy of this software and associated documentation
@@ -39,12 +39,12 @@ import FloatingPoint::*;
 function FloatingPoint#(e,m) canonicalNaN = FloatingPoint{sign: False, exp: '1, sfd: 1 << (valueof(m)-1)};
 
 typedef struct {
-    Data    data;
-    Bit#(5) fflags;
+    Bit#(64) data;
+    Bit#(5)  fflags;
 } FpuResult deriving(Bits, Eq, FShow);
 
-instance FullResultSubset#(FpuResult);
-    function FullResult updateFullResult(FpuResult x, FullResult full_result);
+instance FullResultSubset#(FpuResult, 64);
+    function FullResult#(64) updateFullResult(FpuResult x, FullResult#(64) full_result);
         full_result.data = x.data;
         full_result.fflags = x.fflags;
         return full_result;
@@ -52,7 +52,7 @@ instance FullResultSubset#(FpuResult);
 endinstance
 
 interface FpuExec;
-    method Action       exec(FpuInst fInst, RVRoundMode rm, Data rVal1, Data rVal2, Data rVal3);
+    method Action       exec(FpuInst fInst, RVRoundMode rm, Bit#(64) rVal1, Bit#(64) rVal2, Bit#(64) rVal3);
     method Bool         notEmpty; // True if there is any instruction in this pipeline
     // output
     method Bool         result_rdy;
@@ -74,19 +74,19 @@ endfunction
 `ifndef REUSE_FMA
 // If reusing the FMA, don't bother compiling these.
 // Hopefully this reduces compilation/synthesis time.
-(* synthesize *)
+(* synthesize, gate_all_clocks *)
 module mkDoubleAdd(Server#(Tuple3#(Double, Double, RoundMode), Tuple2#(Double, Exception)));
     let fpu <- mkFloatingPointAdder;
     return fpu;
 endmodule
-(* synthesize *)
+(* synthesize, gate_all_clocks *)
 module mkDoubleMult(Server#(Tuple3#(Double, Double, RoundMode), Tuple2#(Double, Exception)));
     let fpu <- mkFloatingPointMultiplier;
     return fpu;
 endmodule
 `endif
 `ifndef NO_FDIV
-(* synthesize *)
+(* synthesize, gate_all_clocks *)
 module mkDoubleDiv(Server#(Tuple3#(Double, Double, RoundMode), Tuple2#(Double, Exception)));
     let int_div <- mkDivider(2);
     let fpu <- mkFloatingPointDivider(int_div);
@@ -94,32 +94,32 @@ module mkDoubleDiv(Server#(Tuple3#(Double, Double, RoundMode), Tuple2#(Double, E
 endmodule
 `endif
 `ifndef NO_FSQRT
-(* synthesize *)
+(* synthesize, gate_all_clocks *)
 module mkDoubleSqrt(Server#(Tuple2#(Double, RoundMode), Tuple2#(Double, Exception)));
     let int_sqrt <- mkSquareRooter(3);
     let fpu <- mkFloatingPointSquareRooter(int_sqrt);
     return fpu;
 endmodule
 `endif
-(* synthesize *)
+(* synthesize, gate_all_clocks *)
 module mkDoubleFMA(Server#(Tuple4#(Maybe#(Double), Double, Double, RoundMode), Tuple2#(Double, Exception)));
     let fpu <- mkFloatingPointFusedMultiplyAccumulate;
     return fpu;
 endmodule
 // Single Precision FPU Pipelines
 // These aren't used anymore, so don't synthesize them
-// (* synthesize *)
+// (* synthesize, gate_all_clocks *)
 module mkFloatAdd(Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception)));
     let fpu <- mkFloatingPointAdder;
     return fpu;
 endmodule
-// (* synthesize *)
+// (* synthesize, gate_all_clocks *)
 module mkFloatMult(Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception)));
     let fpu <- mkFloatingPointMultiplier;
     return fpu;
 endmodule
 `ifndef NO_FDIV
-// (* synthesize *)
+// (* synthesize, gate_all_clocks *)
 module mkFloatDiv(Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Exception)));
     let int_div <- mkDivider(2);
     let fpu <- mkFloatingPointDivider(int_div);
@@ -127,14 +127,14 @@ module mkFloatDiv(Server#(Tuple3#(Float, Float, RoundMode), Tuple2#(Float, Excep
 endmodule
 `endif
 `ifndef NO_FSQRT
-// (* synthesize *)
+// (* synthesize, gate_all_clocks *)
 module mkFloatSqrt(Server#(Tuple2#(Float, RoundMode), Tuple2#(Float, Exception)));
     let int_sqrt <- mkSquareRooter(3);
     let fpu <- mkFloatingPointSquareRooter(int_sqrt);
     return fpu;
 endmodule
 `endif
-// (* synthesize *)
+// (* synthesize, gate_all_clocks *)
 module mkFloatFMA(Server#(Tuple4#(Maybe#(Float), Float, Float, RoundMode), Tuple2#(Float, Exception)));
     let fpu <- mkFloatingPointFusedMultiplyAccumulate;
     return fpu;
@@ -551,7 +551,7 @@ endfunction
 
 // exec function for simple operations
 (* noinline *)
-function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Data rVal1, Data rVal2);
+function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Bit#(64) rVal1, Bit#(64) rVal2);
     FpuResult fpu_result = FpuResult{data: 0, fflags: 0};
 
     // Convert the Risc-V RVRoundMode to FloatingPoint::RoundMode
@@ -570,19 +570,19 @@ function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Data rVal1, D
         Float in1 = unpack(rVal1[31:0]);
         Float in2 = unpack(rVal2[31:0]);
         Float dst = unpack(0);
-        Maybe#(Data) full_dst = Invalid;
+        Maybe#(Bit#(64)) full_dst = Invalid;
         Exception e = unpack(0);
         let fpu_f = fpu_inst.func;
         // Fpu Decoding
         case (fpu_f)
             // combinational instructions
             FMin:     begin
-                Data x;
+                Bit#(64) x;
                 {x, e} = fmin_s(rVal1, rVal2);
                 full_dst = tagged Valid x;
             end
             FMax:     begin
-                Data x;
+                Bit#(64) x;
                 {x, e} = fmax_s(rVal1, rVal2);
                 full_dst = tagged Valid x;
             end
@@ -642,22 +642,22 @@ function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Data rVal1, D
             end
             // Float -> Int
             FCvt_WF:    begin
-                Data dst_bits;
+                Bit#(64) dst_bits;
                 {dst_bits, e} = fcvt_w_f(in1, fpu_rm);
                 full_dst = tagged Valid dst_bits;
             end
             FCvt_WUF: begin
-                Data dst_bits;
+                Bit#(64) dst_bits;
                 {dst_bits, e} = fcvt_wu_f(in1, fpu_rm);
                 full_dst = tagged Valid dst_bits;
             end
             FCvt_LF:    begin
-                Data dst_bits;
+                Bit#(64) dst_bits;
                 {dst_bits, e} = fcvt_l_f(in1, fpu_rm);
                 full_dst = tagged Valid dst_bits;
             end
             FCvt_LUF: begin
-                Data dst_bits;
+                Bit#(64) dst_bits;
                 {dst_bits, e} = fcvt_lu_f(in1, fpu_rm);
                 full_dst = tagged Valid dst_bits;
             end
@@ -686,19 +686,19 @@ function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Data rVal1, D
         Double in1 = unpack(rVal1);
         Double in2 = unpack(rVal2);
         Double dst = unpack(0);
-        Maybe#(Data) full_dst = Invalid;
+        Maybe#(Bit#(64)) full_dst = Invalid;
         Exception e = unpack(0);
         let fpu_f = fpu_inst.func;
         // Fpu Decoding
         case (fpu_f)
             // combinational instructions
             FMin:     begin
-                Data x;
+                Bit#(64) x;
                 {x, e} = fmin_d(rVal1, rVal2);
                 full_dst = tagged Valid x;
             end
             FMax:     begin
-                Data x;
+                Bit#(64) x;
                 {x, e} = fmax_d(rVal1, rVal2);
                 full_dst = tagged Valid x;
             end
@@ -758,22 +758,22 @@ function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Data rVal1, D
             end
             // Float -> Int
             FCvt_WF:    begin
-                Data dst_bits;
+                Bit#(64) dst_bits;
                 {dst_bits, e} = fcvt_w_f(in1, fpu_rm);
                 full_dst = tagged Valid dst_bits;
             end
             FCvt_WUF: begin
-                Data dst_bits;
+                Bit#(64) dst_bits;
                 {dst_bits, e} = fcvt_wu_f(in1, fpu_rm);
                 full_dst = tagged Valid dst_bits;
             end
             FCvt_LF:    begin
-                Data dst_bits;
+                Bit#(64) dst_bits;
                 {dst_bits, e} = fcvt_l_f(in1, fpu_rm);
                 full_dst = tagged Valid dst_bits;
             end
             FCvt_LUF: begin
-                Data dst_bits;
+                Bit#(64) dst_bits;
                 {dst_bits, e} = fcvt_lu_f(in1, fpu_rm);
                 full_dst = tagged Valid dst_bits;
             end
@@ -801,7 +801,7 @@ function FpuResult execFpuSimple(FpuInst fpu_inst, RVRoundMode rm, Data rVal1, D
     return fpu_result;
 endfunction
 
-(* synthesize *)
+(* synthesize, gate_all_clocks *)
 module mkFpuExecPipeline(FpuExec);
     FIFO#(FpuResult) fpu_exec_fifo <- mkFIFO; // in parallel with pipelined FPUs
     FIFO#(FpuInst) fpu_func_fifo <- mkFIFO; // in parallel with pipelined FPUs
@@ -911,7 +911,7 @@ module mkFpuExecPipeline(FpuExec);
         fpu_exec_fifo_out.enq(x);
     endrule
 
-    method Action exec(FpuInst fpu_inst, RVRoundMode rm, Data rVal1, Data rVal2, Data rVal3);
+    method Action exec(FpuInst fpu_inst, RVRoundMode rm, Bit#(64) rVal1, Bit#(64) rVal2, Bit#(64) rVal3);
         // Convert the Risc-V RVRoundMode to FloatingPoint::RoundMode
         RoundMode fpu_rm = (case (rm)
                 RNE:        Rnd_Nearest_Even;
@@ -931,7 +931,7 @@ module mkFpuExecPipeline(FpuExec);
             Float in2 = unpack(rVal2[31:0]);
             Float in3 = unpack(rVal3[31:0]);
             Float dst = unpack(0);
-            Maybe#(Data) full_dst = Invalid;
+            Maybe#(Bit#(64)) full_dst = Invalid;
             Exception e = unpack(0);
             let fpu_f = fpu_inst.func;
             // Fpu Decoding
@@ -957,7 +957,7 @@ module mkFpuExecPipeline(FpuExec);
             Double in2 = unpack(rVal2);
             Double in3 = unpack(rVal3);
             Double dst = unpack(0);
-            Maybe#(Data) full_dst = Invalid;
+            Maybe#(Bit#(64)) full_dst = Invalid;
             Exception e = unpack(0);
             let fpu_f = fpu_inst.func;
             // Fpu Decoding
@@ -991,11 +991,11 @@ endmodule
 
 `else
 
-(* synthesize *)
+(* synthesize, gate_all_clocks *)
 module mkFpuExecPipeline(FpuExec);
     FIFOF#(FpuResult) fpu_exec_fifo <- mkFIFOF;
 
-    method Action exec(FpuInst fpu_inst, RVRoundMode rm, Data rVal1, Data rVal2, Data rVal3);
+    method Action exec(FpuInst fpu_inst, RVRoundMode rm, Bit#(64) rVal1, Bit#(64) rVal2, Bit#(64) rVal3);
         $fdisplay(stderr, "[ERROR] mkFpuExecDummy is in use");
         // don't do the function...
         FpuResult res = unpack(0);

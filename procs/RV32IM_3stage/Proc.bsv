@@ -26,19 +26,24 @@
 import BuildVector::*;
 import DefaultValue::*;
 import ClientServer::*;
+import Clocks::*;
 import Connectable::*;
 import FIFO::*;
 import GetPut::*;
 import Vector::*;
 
 import ClientServerUtil::*;
+import FIFOG::*;
+import GenericAtomicMem::*;
+import PolymorphicMem::*;
+import Port::*;
+import MemUtil::*;
 import ServerUtil::*;
 
 import Abstraction::*;
-import BasicMemorySystemBlocks::*;
-import BramIDMem::*;
+// import BasicMemorySystemBlocks::*;
+// import BramIDMem::*;
 import Core::*;
-import MemoryMappedCSRs::*;
 import ProcPins::*;
 import RTC::*;
 import RVUart::*;
@@ -51,6 +56,8 @@ import VerificationPacketFilter::*;
 // This is used by ProcConnectal
 typedef DataSz MainMemoryWidth;
 
+// Multiple devices in mkProc can't be clock gated, so the mkProc module
+// should not have the gate_all_clocks attribute.
 (* synthesize *)
 module mkProc(Proc#(DataSz));
     // Address map (some portions hard-coded in memory system
@@ -62,141 +69,83 @@ module mkProc(Proc#(DataSz));
     let clock <- exposeCurrentClock();
 
 `ifdef CONFIG_RV32
-    RTC#(1) rtc <- mkRTC_RV32;
+    RTC#(1, ByteEnMemServerPort#(32,2)) rtc <- mkRTC_RV32;
 `else
-    RTC#(1) rtc <- mkRTC_RV64;
+    RTC#(1, ByteEnMemServerPort#(64,3)) rtc <- mkRTC_RV64;
 `endif
 
     //   9600 baud: divisor = 26042
     // 115200 baud: divisor = 134
-    RVUart#(1) uart_module <- mkRVUart_RV32(17);
+    RVUart#(ByteEnMemServerPort#(32,2)) uart_module <- mkRVUart_RV32(17);
 
-    RVSPI spi_module <- mkRVSPI();
+    RVSPI#(ByteEnMemServerPort#(32,2)) spi_module <- mkRVSPI();
 
     Bool timer_interrupt = rtc.timerInterrupt[0];
     Bit#(64) timer_value = rtc.timerValue;
 
     Wire#(Bool) extInterruptWire <- mkDWire(False);
 
-    // Shared I/D Memory
-    // the type of the imem port is Server#(Bit#(XLEN), Bit#(32))
-    // the type of the dmem port is Server#(UncachedMemReq, UncachedMemResp)
-    let sram <- mkBramIDMem;
+`ifdef CONFIG_IDMEM_INIT_HEX_FILE
+    let sram <- mkPolymorphicBRAMLoad(64*1024/4, tagged Hex `CONFIG_IDMEM_INIT_HEX_FILE);
+`else
+    let sram <- mkPolymorphicBRAM(64*1024/4);
+`endif
 
-    // This is the new way:
-    FIFO#(UncachedMemReq) uncachedReqFIFO <- mkFIFO;
-    FIFO#(UncachedMemResp) uncachedRespFIFO <- mkFIFO;
-    let mmio_server = toGPServer(uncachedReqFIFO, uncachedRespFIFO);
-    let mmio_client = toGPClient(uncachedReqFIFO, uncachedRespFIFO);
+    // MMIO server for devices outside of the processor
+    FIFOG#(CoarseMemReq#(32,2)) uncachedReqFIFO <- mkFIFOG;
+    FIFOG#(CoarseMemResp#(2)) uncachedRespFIFO <- mkFIFOG;
+    let mmio_server = toServerPort(uncachedReqFIFO, uncachedRespFIFO);
+    let mmio_client = toClientPort(uncachedReqFIFO, uncachedRespFIFO);
 
-    // address decoding the dmem port of the sram for the RTC and MMIO
-    function Bit#(3) whichServer(UncachedMemReq r);
-        if (r.addr >= 'h4000_0000) return 4;
-        else if (r.addr >= 'h3001_0000) return 3;
-        else if (r.addr >= 'h3000_0000) return 2;
-        else if (r.addr >= 'h2000_0000) return 1;
-        else return 0;
-    endfunction
-    function Bool getsResponse(UncachedMemReq r);
-        // currently all UncachedMemReq's get a response
-        return True;
-    endfunction
-    MemoryBus#(UncachedMemReq, UncachedMemResp) memoryBus <- mkMemoryBus(whichServer, getsResponse, vec(sram.dmem, rtc.memifc, uart_module.memifc, spi_module.memifc, mmio_server));
+    // numClients = 3
+    // addrSz = 32
+    // logNumBytes = 2
+    MixedAtomicMemBus#(3, 32, 2) memBus <- mkMixedAtomicMemBus(vec(
+            mixedMemBusItemFromAddrRange( 'h0000_0000, 'h1FFF_FFFF, tagged ByteEn sram ),
+            mixedMemBusItemFromAddrRange( 'h2000_0000, 'h2FFF_FFFF, tagged ByteEn rtc.memifc ),
+            mixedMemBusItemFromAddrRange( 'h3000_0000, 'h3000_FFFF, tagged ByteEn uart_module.memifc ),
+            mixedMemBusItemFromAddrRange( 'h3001_0000, 'h3001_FFFF, tagged ByteEn spi_module.memifc ),
+            mixedMemBusItemFromAddrRange( 'h4000_0000, 'h7FFF_FFFF, tagged Coarse mmio_server ),
+            mixedMemBusItemFromAddrRange( 'h8000_0000, 'hFFFF_FFFF, tagged Coarse mmio_server )));
 
-    // mkUncachedConverter converts UncachedMemServer to Server#(RVDMemReq, RVDMemResp)
-    let proc_dmem_ifc <- mkUncachedConverter(memoryBus.procIfc);
+    ReadOnlyMemServerPort#(32, 2) imem = simplifyMemServerPort(memBus.clients[0]);
 
-    Core core <- mkThreeStageCore(
-                    sram.imem,
-                    proc_dmem_ifc,
+    Core#(32) core <- mkThreeStageCore(
+                    imem,
+                    memBus.clients[1],
                     False, // inter-process interrupt
                     timer_interrupt, // timer interrupt
                     timer_value, // timer value
                     extInterruptWire, // external interrupt
                     0); // hart ID
 
-    // Verification Packet Connection
-    VerificationPacketFilter verificationPacketFilter <- mkVerificationPacketFilter(core.getVerificationPacket);
-
     // Processor Control
-    method Action start(Bit#(64) startPc, Bit#(64) verificationPacketsToIgnore, Bool sendSynchronizationPackets);
-        if (startPc != 0) begin
-            // This processor does not have the same memory layout as spike,
-            // so for now we are assuming this processor has rstvec = 0
-            $fdisplay(stderr, "[WARNING] startPc != 0");
-            $fflush(stderr);
-        end
-        core.start(truncate(startPc));
-        verificationPacketFilter.init(verificationPacketsToIgnore, sendSynchronizationPackets);
+    method Action start();
+        core.start(0);
     endmethod
     method Action stop();
         core.stop;
     endmethod
 
     // Verification
-    method ActionValue#(VerificationPacket) getVerificationPacket;
-        let verificationPacket <- verificationPacketFilter.getPacket;
-        return verificationPacket;
+    method Maybe#(VerificationPacket) currVerificationPacket;
+        return core.currVerificationPacket;
     endmethod
 
     // Main Memory Connection
-    // XXX: Currently unattached
-    interface MainMemClient ram;
-        interface Get request;
-            method ActionValue#(MainMemReq) get if (False);
-                return ?;
-            endmethod
-        endinterface
-        interface Put response;
-            method Action put(MainMemResp resp);
-                noAction;
-            endmethod
-        endinterface
-    endinterface
-    // XXX: Currently unattached
-    interface MainMemClient rom;
-        interface Get request;
-            method ActionValue#(MainMemReq) get if (False);
-                return ?;
-            endmethod
-        endinterface
-        interface Put response;
-            method Action put(MainMemResp resp);
-                noAction;
-            endmethod
-        endinterface
-    endinterface
+    interface CoarseMemClientPort ram = nullClientPort;
 
-    interface UncachedMemClient mmio = mmio_client;
+    interface CoarseMemServerPort mmio = mmio_client;
 
-    interface GenericMemServer extmem;
-        interface Put request;
-            method Action put(GenericMemReq#(XLEN) x);
-                if (x.byteen != '1) begin
-                    $fdisplay(stderr, "[ERROR] mkProc.extmem : expecting byteen to be all 1's, but byteen = ", fshow(x.byteen));
-                end
-                memoryBus.extIfc.request.put(UncachedMemReq {
-                        write:  x.write,
-                        size:   (valueOf(XLEN) == 64 ? D : W),
-                        addr:   x.addr,
-                        data:   x.data
-                    } );
-            endmethod
-        endinterface
-        interface Get response;
-            method ActionValue#(GenericMemResp#(XLEN)) get();
-                let x <- memoryBus.extIfc.response.get;
-                return GenericMemResp {
-                        write: x.write,
-                        data:  x.data
-                    };
-            endmethod
-        endinterface
-    endinterface
+    interface CoarseMemServerPort extmem = simplifyMemServerPort(memBus.clients[2]);
 
     // Interrupts
     method Action triggerExternalInterrupt;
         extInterruptWire <= True;
+    endmethod
+
+    method Action stallPipeline(Bool stall);
+        core.stallPipeline(stall);
     endmethod
 
     interface ProcPins pins;

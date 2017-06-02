@@ -36,10 +36,12 @@ import FIFO::*;
 import GetPut::*;
 
 import Ehr::*;
+import MemUtil::*;
+import Port::*;
 
 import Abstraction::*;
 import RegUtil::*;
-import RVRFile::*;
+import RVRegFile::*;
 `ifdef CONFIG_U
 import RVCsrFile::*;
 `else
@@ -53,40 +55,47 @@ import RVMemory::*;
 import RVMulDiv::*;
 `endif
 
-interface Core;
-    method Action start(Addr startPc);
+interface Core#(numeric type xlen);
+    method Action start(Bit#(xlen) startPc);
     method Action stop;
-    method ActionValue#(VerificationPacket) getVerificationPacket;
+    method Action stallPipeline(Bool stall);
+    method Maybe#(VerificationPacket) currVerificationPacket;
 endinterface
 
 module mkThreeStageCore#(
-            Server#(Addr, Instruction) ifetch,
-            Server#(RVDMemReq, RVDMemResp) dmem,
+            ReadOnlyMemServerPort#(xlen, 2) ifetch,
+            AtomicMemServerPort#(xlen, TLog#(TDiv#(xlen,8))) dmem,
             Bool ipi,
             Bool timerInterrupt,
             Bit#(64) timer,
             Bool externalInterrupt,
-            Data hartID
-        )(Core);
-    ArchRFile rf <- mkBypassArchRFile;
-`ifdef CONFIG_U
+            Bit#(xlen) hartID
+        )(Core#(xlen)) provisos (NumAlias#(xlen, 32));
+
+    Reg#(Bool) stallReg <- mkReg(False);
+
+    RVRegFile#(xlen) rf <- mkRVRegFileBypass(False); // make this true if you add an FPU
+
+    // TODO: make this depend on a bool
     // If user mode is supported, use the full CSR File
-    RVCsrFile csrf <- mkRVCsrFile(hartID, timer, timerInterrupt, ipi, externalInterrupt);
+    RVCsrFile#(xlen) csrf <-
+`ifdef CONFIG_U
+        mkRVCsrFile(hartID, timer, timerInterrupt, ipi, externalInterrupt);
 `else
-    // Otherwise use the M-only CSR File designed for MCUs
-    RVCsrFileMCU csrf <- mkRVCsrFileMCU(hartID, timer, timerInterrupt, ipi, externalInterrupt);
+        mkRVCsrFileMCU(hartID, timer, timerInterrupt, ipi, externalInterrupt);
 `endif
 
+    // TODO: make this depend on a bool
 `ifdef CONFIG_M
-    MulDivExec mulDiv <- mkBoothRoughMulDivExec;
+    MulDivExec#(xlen) mulDiv <- mkBoothRoughMulDivExec;
 `endif
 
-    Ehr#(4, Maybe#(FetchState)) fetchStateEhr <- mkEhr(tagged Invalid);
-    Ehr#(4, Maybe#(ExecuteState)) executeStateEhr <- mkEhr(tagged Invalid);
-    Ehr#(4, Maybe#(WriteBackState)) writeBackStateEhr <- mkEhr(tagged Invalid);
+    Ehr#(4, Maybe#(FetchState#(xlen))) fetchStateEhr <- mkEhr(tagged Invalid);
+    Ehr#(4, Maybe#(ExecuteState#(xlen))) executeStateEhr <- mkEhr(tagged Invalid);
+    Ehr#(4, Maybe#(WriteBackState#(xlen))) writeBackStateEhr <- mkEhr(tagged Invalid);
 
-    FIFO#(VerificationPacket) verificationPackets <- mkFIFO;
-    
+    Ehr#(2, Maybe#(VerificationPacket)) verificationPacketEhr <- mkEhr(tagged Invalid);
+
     let fetchRegs = FetchRegs{
             fs: fetchStateEhr[2],
             es: executeStateEhr[2],
@@ -116,13 +125,18 @@ module mkThreeStageCore#(
 `endif
         csrf: csrf,
         rf: rf,
-        verificationPackets: verificationPackets};
-    WriteBackStage w <- mkWriteBackStage(writeBackRegs);
+        verificationPackets: verificationPacketEhr[1]};
+    WriteBackStage w <- mkWriteBackStage(writeBackRegs, stallReg);
 
-    method Action start(Addr startPc);
+    rule clearVerificationPacketEhr;
+        verificationPacketEhr[0] <= tagged Invalid;
+    endrule
+
+    method Action start(Bit#(xlen) startPc);
         fetchStateEhr[3] <= tagged Valid FetchState { pc: startPc };
         executeStateEhr[3] <= tagged Invalid;
         writeBackStateEhr[3] <= tagged Invalid;
+        stallReg <= False;
     endmethod
     method Action stop;
         fetchStateEhr[3] <= tagged Invalid;
@@ -130,9 +144,11 @@ module mkThreeStageCore#(
         writeBackStateEhr[3] <= tagged Invalid;
     endmethod
 
-    method ActionValue#(VerificationPacket) getVerificationPacket;
-        let verificationPacket = verificationPackets.first;
-        verificationPackets.deq;
-        return verificationPacket;
+    method Action stallPipeline(Bool stall);
+        stallReg <= stall;
+    endmethod
+
+    method Maybe#(VerificationPacket) currVerificationPacket;
+        return stallReg ? tagged Invalid : verificationPacketEhr[0];
     endmethod
 endmodule

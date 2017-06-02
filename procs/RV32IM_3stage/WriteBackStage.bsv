@@ -23,13 +23,14 @@
 
 `include "ProcConfig.bsv"
 
-import CoreStates::*;
-
 import FIFO::*;
 import GetPut::*;
 
+import MemUtil::*;
+import Port::*;
+
 import Abstraction::*;
-import RVRFile::*;
+import RVRegFile::*;
 `ifdef CONFIG_U
 import RVCsrFile::*;
 `else
@@ -43,29 +44,26 @@ import RVMemory::*;
 import RVMulDiv::*;
 `endif
 
+import CoreStates::*;
+
 interface WriteBackStage;
 endinterface
 
 typedef struct {
-    Reg#(Maybe#(FetchState)) fs;
-    Reg#(Maybe#(ExecuteState)) es;
-    Reg#(Maybe#(WriteBackState)) ws;
-    Get#(RVDMemResp) dmemres;
+    Reg#(Maybe#(FetchState#(xlen))) fs;
+    Reg#(Maybe#(ExecuteState#(xlen))) es;
+    Reg#(Maybe#(WriteBackState#(xlen))) ws;
+    // OutputPort#(RVDMemResp) dmemres;
+    OutputPort#(AtomicMemResp#(2)) dmemres;
 `ifdef CONFIG_M
-    MulDivExec mulDiv;
+    MulDivExec#(xlen) mulDiv;
 `endif
-`ifdef CONFIG_U
-    // If user mode is supported, use the full CSR File
-    RVCsrFile csrf;
-`else
-    // Otherwise use the M-only CSR File designed for MCUs
-    RVCsrFileMCU csrf;
-`endif
-    ArchRFile rf;
-    FIFO#(VerificationPacket) verificationPackets;
-} WriteBackRegs;
+    RVCsrFile#(xlen) csrf;
+    RVRegFile#(xlen) rf;
+    Reg#(Maybe#(VerificationPacket)) verificationPackets;
+} WriteBackRegs#(numeric type xlen);
 
-module mkWriteBackStage#(WriteBackRegs wr)(WriteBackStage);
+module mkWriteBackStage#(WriteBackRegs#(xlen) wr, Bool stall)(WriteBackStage) provisos (NumAlias#(xlen, 32));
     let dmemres = wr.dmemres;
     let csrf = wr.csrf;
     let rf = wr.rf;
@@ -74,7 +72,8 @@ module mkWriteBackStage#(WriteBackRegs wr)(WriteBackStage);
 `endif
 
     rule doWriteBack(wr.ws matches tagged Valid .writeBackState
-                        &&& (writeBackState.dInst.execFunc != tagged System WFI || csrf.wakeFromWFI()));
+                        &&& (writeBackState.dInst.execFunc != tagged System WFI || csrf.wakeFromWFI())
+                        &&& !stall);
         let pc = writeBackState.pc;
         let trap = writeBackState.trap;
         let dInst = writeBackState.dInst;
@@ -92,8 +91,15 @@ module mkWriteBackStage#(WriteBackRegs wr)(WriteBackStage);
 
         if (dInst.execFunc matches tagged Mem .memInst &&& trap == tagged Invalid) begin
             if (getsResponse(memInst.op)) begin
-                data <- dmemres.get;
+                data = dmemres.first.data >> {addr[1:0], 3'b0};
+                let extendFunc = memInst.isUnsigned ? zeroExtend : signExtend;
+                data = (case (memInst.size)
+                        B: extendFunc(data[7:0]);
+                        H: extendFunc(data[15:0]);
+                        W: extendFunc(data[31:0]);
+                    endcase);
             end
+            dmemres.deq;
         end
 
         let csrfResult <- csrf.wr(
@@ -143,7 +149,7 @@ module mkWriteBackStage#(WriteBackRegs wr)(WriteBackStage);
                     trapCause = pack(x);
                 end
         endcase
-        wr.verificationPackets.enq( VerificationPacket {
+        wr.verificationPackets <= tagged Valid VerificationPacket {
                 skippedPackets: 0,
                 pc: signExtend(pc),
                 data: signExtend(fromMaybe(data, maybeData)),
@@ -152,7 +158,7 @@ module mkWriteBackStage#(WriteBackRegs wr)(WriteBackStage);
                 dst: {pack(dInst.dst), getInstFields(inst).rd},
                 exception: isException,
                 interrupt: isInterrupt,
-                cause: trapCause } );
+                cause: trapCause };
 
         if (maybeNextPc matches tagged Valid .replayPc) begin
             // This instruction is not writing to the register file

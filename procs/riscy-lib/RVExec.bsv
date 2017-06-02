@@ -32,24 +32,25 @@ import RVControl::*;
 import RVMemory::*;
 
 typedef struct {
-    Data data;
-    Addr addr;
+    Bit#(xlen) data;
+    Bit#(xlen) addr;
     Bool taken;
-    Addr nextPc;
-} ExecResult deriving (Bits, Eq, FShow);
+    Bit#(xlen) nextPc;
+} ExecResult#(numeric type xlen) deriving (Bits, Eq, FShow);
 
 // Reference implementation of the exec function
 // This is an inefficient implementation because many of the functions used
 // in the case statement can reuse hardware
 (* noinline *)
-function ExecResult execRef(RVDecodedInst dInst, Data rVal1, Data rVal2, Addr pc);
-    Data data = 0;
-    Addr addr = 0;
-    Addr pcPlus4 = pc + 4;
+function ExecResult#(xlen) execRef(RVDecodedInst dInst, Bit#(xlen) rVal1, Bit#(xlen) rVal2, Bit#(xlen) pc)
+        provisos (NumAlias#(XLEN, xlen));
+    Bit#(xlen) data = 0;
+    Bit#(xlen) addr = 0;
+    Bit#(xlen) pcPlus4 = pc + 4;
     Bool taken = False;
-    Addr nextPc = pcPlus4;
+    Bit#(xlen) nextPc = pcPlus4;
 
-    Maybe#(Data) imm = getImmediate(dInst.imm, dInst.inst);
+    Maybe#(Bit#(xlen)) imm = getImmediate(dInst.imm, dInst.inst);
     case (dInst.execFunc) matches
         tagged Alu    .aluInst:
             begin
@@ -85,10 +86,11 @@ endfunction
 
 // functions for execBasic
 (* noinline *)
-function Data alu(AluFunc func, Bool w, Data a, Data b);
-`ifndef CONFIG_RV64
-    w = True;
-`endif
+function Bit#(xlen) alu(AluFunc func, Bool w, Bit#(xlen) a, Bit#(xlen) b)
+        provisos (NumAlias#(XLEN, xlen));
+    if (valueOf(xlen) == 32) begin
+        w = True;
+    end
     // setup inputs
     if (w) begin
         a = (func == Sra) ? signExtend(a[31:0]) : zeroExtend(a[31:0]);
@@ -99,7 +101,7 @@ function Data alu(AluFunc func, Bool w, Data a, Data b);
         shamt = {1'b0, shamt[4:0]};
     end
 
-    Data res = (case(func)
+    Bit#(xlen) res = (case(func)
             Add, Auipc, Lui: (a + b);
             Sub:        (a - b);
             And:        (a & b);
@@ -120,8 +122,7 @@ function Data alu(AluFunc func, Bool w, Data a, Data b);
     return res;
 endfunction
 
-(* noinline *)
-function Bool aluBr(BrFunc brFunc, Data a, Data b);
+function Bool aluBr(BrFunc brFunc, Bit#(xlen) a, Bit#(xlen) b);
     Bool brTaken = (case(brFunc)
             Eq:         (a == b);
             Neq:        (a != b);
@@ -136,29 +137,27 @@ function Bool aluBr(BrFunc brFunc, Data a, Data b);
     return brTaken;
 endfunction
 
-(* noinline *)
-function Addr brAddrCalc(BrFunc brFunc, Addr pc, Data val, Data imm);
-    Addr targetAddr = (case (brFunc)
+function Bit#(xlen) brAddrCalc(BrFunc brFunc, Bit#(xlen) pc, Bit#(xlen) val, Bit#(xlen) imm) provisos (Add#(a__, 1, xlen));
+    Bit#(xlen) targetAddr = (case (brFunc)
             Jal:        (pc + imm);
-            Jalr:       {(val + imm)[valueOf(AddrSz)-1:1], 1'b0};
+            Jalr:       {(val + imm)[valueOf(xlen)-1:1], 1'b0};
             default:    (pc + imm);
         endcase);
     return targetAddr;
 endfunction
 
-(* noinline *)
-function ExecResult basicExec(RVDecodedInst dInst, Data rVal1, Data rVal2, Addr pc /*, Addr ppc */);
+function ExecResult#(xlen) basicExec(RVDecodedInst dInst, Bit#(xlen) rVal1, Bit#(xlen) rVal2, Bit#(xlen) pc) provisos (NumAlias#(XLEN, xlen));
     // PC+4 is used in a few places
-    Addr pcPlus4 = pc + 4;
+    Bit#(xlen) pcPlus4 = pc + 4;
 
     // just data, addr, and control flow
-    Data data = 0;
-    Addr addr = 0;
+    Bit#(xlen) data = 0;
+    Bit#(xlen) addr = 0;
     Bool taken = False;
-    Addr nextPc = pcPlus4;
+    Bit#(xlen) nextPc = pcPlus4;
 
     // Immediate Field
-    Maybe#(Data) imm = getImmediate(dInst.imm, dInst.inst);
+    Maybe#(Bit#(xlen)) imm = getImmediate(dInst.imm, dInst.inst);
     if (dInst.execFunc matches tagged Mem .*) begin
         if (!isValid(imm)) begin
             // Lr, Sc, and AMO instructions don't have immediate fields, so ovveride the immediate field here for address calculation
@@ -167,8 +166,8 @@ function ExecResult basicExec(RVDecodedInst dInst, Data rVal1, Data rVal2, Addr 
     end
 
     // ALU
-    Data aluVal1 = rVal1;
-    Data aluVal2 = imm matches tagged Valid .validImm ? validImm : rVal2;
+    Bit#(xlen) aluVal1 = rVal1;
+    Bit#(xlen) aluVal2 = imm matches tagged Valid .validImm ? validImm : rVal2;
     if (dInst.execFunc matches tagged Alu .aluInst) begin
         // Special functions use special inputs
         case (aluInst.op) matches
@@ -179,7 +178,7 @@ function ExecResult basicExec(RVDecodedInst dInst, Data rVal1, Data rVal2, Addr 
     // Use Add as default for memory instructions so alu result is the address
     AluFunc aluF = dInst.execFunc matches tagged Alu .aluInst ? aluInst.op : Add;
     Bool w = dInst.execFunc matches tagged Alu .aluInst ? aluInst.w : False;
-    Data aluResult = alu(aluF, w, aluVal1, aluVal2);
+    Bit#(xlen) aluResult = alu(aluF, w, aluVal1, aluVal2);
 
     // Branch
     if (dInst.execFunc matches tagged Br .brFunc) begin
@@ -208,8 +207,10 @@ function ExecResult basicExec(RVDecodedInst dInst, Data rVal1, Data rVal2, Addr 
     return ExecResult{data: data, addr: addr, taken: taken, nextPc: nextPc};
 endfunction
 
-// function Data gatherLoad(Addr addr, ByteEn byteEn, Bool unsignedLd, Data data);
-function Data gatherLoad(DataByteSel byteSel, RVMemSize size, Bool isUnsigned, Data data);
+function Bit#(xlen) gatherLoad(Bit#(TLog#(TDiv#(xlen,8))) byteSel, RVMemSize size, Bool isUnsigned, Bit#(xlen) data)
+        provisos (Add#(a__, 32, xlen),
+                  Add#(b__, 16, xlen),
+                  Add#(c__, 8, xlen));
     function extend = isUnsigned ? zeroExtend : signExtend;
 
     let bitsToShiftBy = {byteSel, 3'b0}; // byteSel * 8
@@ -218,15 +219,14 @@ function Data gatherLoad(DataByteSel byteSel, RVMemSize size, Bool isUnsigned, D
             B: extend(data[7:0]);
             H: extend(data[15:0]);
             W: extend(data[31:0]);
-`ifdef CONFIG_RV64
-            D: data[63:0];
-`endif
+            D: data;
         endcase);
 
     return data;
 endfunction
 
-function Tuple2#(DataByteEn, Data) scatterStore(DataByteSel byteSel, RVMemSize size, Data data);
+function Tuple2#(DataByteEn, Bit#(xlen)) scatterStore(DataByteSel byteSel, RVMemSize size, Bit#(xlen) data)
+        provisos (NumAlias#(XLEN, xlen));
     let bitsToShiftBy = {byteSel, 3'b0}; // byteSel * 8
     data = data << bitsToShiftBy;
     DataByteEn permutedByteEn = toPermutedDataByteEn(size, byteSel);

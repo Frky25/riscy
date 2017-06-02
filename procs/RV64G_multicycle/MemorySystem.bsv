@@ -1,5 +1,5 @@
 
-// Copyright (c) 2016 Massachusetts Institute of Technology
+// Copyright (c) 2016, 2017 Massachusetts Institute of Technology
 
 // Permission is hereby granted, free of charge, to any person
 // obtaining a copy of this software and associated documentation
@@ -23,93 +23,138 @@
 
 import BuildVector::*;
 import ClientServer::*;
-import FIFO::*;
 import GetPut::*;
 import Vector::*;
 
+import FIFOG::*;
+import MemUtil::*;
+import Port::*;
+import PortUtil::*;
 import PrintTrace::*;
-import ServerUtil::*;
 
 import BasicMemorySystemBlocks::*;
 import Abstraction::*;
 import RVTypes::*;
 
-module mkBasicMemorySystem#(function PMA getPMA(PAddr addr))(SingleCoreMemorySystem#(DataSz));
-    Bool verbose = False;
-    File tracefile = verbose ? stdout : tagged InvalidFile;
+interface MemorySystem#(numeric type xlen);
+    // To Front-End
+    interface ServerPort#(RVIMMUReq#(xlen), RVIMMUResp#(xlen)) ivat;
+    interface ReadOnlyMemServerPort#(xlen, 2) ifetch; // ifetch is a 32-bit interface
+    // To Back-End
+    interface ServerPort#(RVDMMUReq#(xlen), RVDMMUResp#(xlen)) dvat;
+    interface AtomicMemServerPort#(xlen, TLog#(TDiv#(xlen,8))) dmem;
+    interface ServerPort#(FenceReq, FenceResp) fence;
+    method Action updateVMInfoI(VMInfo#(xlen) vmI);
+    method Action updateVMInfoD(VMInfo#(xlen) vmD);
+endinterface
 
-    // cached memory port -- works on cache lines
-    FIFO#(MainMemReq) mainMemReqFIFO <- mkFIFO;
-    FIFO#(MainMemResp) mainMemRespFIFO <- mkFIFO;
-    let mainMemoryServer = toGPServer(mainMemReqFIFO, mainMemRespFIFO);
-    let mainMemoryClient = toGPClient(mainMemReqFIFO, mainMemRespFIFO);
+interface MulticoreMemorySystem#(numeric type xlen, numeric type numCores, numeric type mainMemWidth);
+    interface Vector#(numCores, MemorySystem#(xlen)) core;
+    // To main memory and devices
+    interface CoarseMemClientPort#(xlen, TLog#(TDiv#(xlen,8))) cachedMemory;
+    interface AtomicMemClientPort#(xlen, TLog#(TDiv#(xlen,8))) uncachedMemory;
+    // Memory requests from external devices
+    interface CoarseMemServerPort#(xlen, TLog#(TDiv#(xlen,8))) extMemory;
+endinterface
 
-    // uncached port -- works on 64-bit words
-    FIFO#(UncachedMemReq) uncachedReqFIFO <- mkFIFO;
-    FIFO#(UncachedMemResp) uncachedRespFIFO <- mkFIFO;
-    let uncachedMemServer = toGPServer(uncachedReqFIFO, uncachedRespFIFO);
-    let uncachedMemClient = toGPClient(uncachedReqFIFO, uncachedRespFIFO);
+typedef MulticoreMemorySystem#(xlen, 1, mainMemWidth) SingleCoreMemorySystem#(numeric type xlen, numeric type mainMemWidth);
+
+
+module mkBasicMemorySystem#(function PMA getPMA(PAddr addr))(SingleCoreMemorySystem#(xlen, DataSz))
+        provisos (NumAlias#(xlen, XLEN)); // TODO: make this a parameter
+    // Main Memory CoarseMem Interface
+    FIFOG#(CoarseMemReq#(xlen, TLog#(TDiv#(xlen,8)))) mainMemReqFIFO <- mkFIFOG;
+    FIFOG#(CoarseMemResp#(TLog#(TDiv#(xlen,8)))) mainMemRespFIFO <- mkFIFOG;
+    let mainMemoryServer = toServerPort(mainMemReqFIFO, mainMemRespFIFO);
+    let mainMemoryClient = toClientPort(mainMemReqFIFO, mainMemRespFIFO);
+
+    // MMIO AtomicMem Interface
+    FIFOG#(AtomicMemReq#(xlen, TLog#(TDiv#(xlen,8)))) uncachedReqFIFO <- mkFIFOG;
+    FIFOG#(AtomicMemResp#(TLog#(TDiv#(xlen,8)))) uncachedRespFIFO <- mkFIFOG;
+    let uncachedMemServer = toServerPort(uncachedReqFIFO, uncachedRespFIFO);
+    let uncachedMemClient = toClientPort(uncachedReqFIFO, uncachedRespFIFO);
 
     // splits cached memory port for itlb, imem, dtlb, and dmem
-    Vector#(5, Server#(MainMemReq, MainMemResp)) mainMemorySplitServer <- mkFixedPriorityServerSplitter(constFn(True), 8, mainMemoryServer);
+    Vector#(5, CoarseMemServerPort#(xlen, TLog#(TDiv#(xlen,8)))) mainMemorySplitServer <- mkFixedPriorityServerPortSplitter(constFn(True), 2, mainMemoryServer);
+
+    Vector#(2, AtomicMemServerPort#(xlen, TLog#(TDiv#(xlen,8)))) uncachedMemSplitServer <- mkFixedPriorityServerPortSplitter(constFn(True), 2, uncachedMemServer);
 
     // extMemServer -- works on 64-bit words
     let extMemServer = mainMemorySplitServer[4];
 
-    let itlb <- mkDummyRVIMMU(getPMA, fprintTrace(tracefile, "IMMU-Arbiter", mainMemorySplitServer[3]));
-    let icache <- mkDummyRVICache(fprintTrace(tracefile, "ICache-Arbiter", mainMemorySplitServer[2]));
-    let dtlb <- mkDummyRVDMMU(False, getPMA, fprintTrace(tracefile, "DMMU-Arbiter", mainMemorySplitServer[1]));
+    let itlb <- mkDummyRVIMMU64(getPMA, mainMemorySplitServer[3]);
+    // two different paths for imem request to take: cached and uncached
+    let icache = simplifyMemServerPort(mainMemorySplitServer[2]);
+    // let icache <- mkDummyRVICache(mainMemorySplitServer[2]);
+    // was mkUncachedIMemConverter:
+    let iuncached = simplifyMemServerPort(uncachedMemSplitServer[1]);
+
+    let dtlb <- mkDummyRVDMMU64(False, getPMA, mainMemorySplitServer[1]);
     // two different paths for dmem request to take: cached and uncached
-    let dcache <- mkDummyRVDCache(fprintTrace(tracefile, "DCache-Arbiter", mainMemorySplitServer[0]));
-    let duncached <- mkUncachedConverter(fprintTrace(tracefile, "DUncached-Bridge", uncachedMemServer));
+    // let dcache <- mkDummyRVDCache(mainMemorySplitServer[0]);
+    let dcache <- mkEmulateMemServerPort(mainMemorySplitServer[0]);
+    // let duncached <- mkUncachedConverter(uncachedMemSplitServer[0]); // TODO: reimplement me
+    let duncached = uncachedMemSplitServer[0];
+
     // join cached and uncached paths to make a unified dmem interface
-    function Bit#(1) whichServer(RVDMemReq r);
+    function Bit#(1) whichServerData(AtomicMemReq#(xlen, TLog#(TDiv#(xlen,8))) r);
         return (case (getPMA(r.addr))
-                    MainMemory, IORom: 0; // cached
+                    MainMemory: 0; // cached
                     default: 1; // uncached
                 endcase);
     endfunction
-    function Bool getsResponse(RVDMemReq r);
-        return (case (r.op) matches
-                tagged Mem St: False;
-                default: True;
-            endcase);
+    function Bit#(1) whichServerInst(ReadOnlyMemReq#(xlen, TLog#(TDiv#(xlen,8))) r);
+        return (case (getPMA(r.addr))
+                    MainMemory: 0; // cached
+                    default: 1; // uncached
+                endcase);
     endfunction
-    let dmem <- mkServerJoiner(whichServer, getsResponse, 4, vec(dcache, duncached));
+    let dmem <- mkServerPortJoiner(whichServerData, constFn(True), 2, vec(dcache, duncached));
+    ReadOnlyMemServerPort#(xlen, TLog#(TDiv#(xlen,8))) imem <- mkServerPortJoiner(whichServerInst, constFn(True), 2, vec(icache, iuncached));
+    let imem_32bit <- mkNarrowerMemServerPort(imem);
 
-    Vector#(numCores, MemorySystem) onecore;
+    Vector#(numCores, MemorySystem#(xlen)) onecore;
     onecore[0] = (interface MemorySystem;
-            interface Server ivat = fprintTrace(tracefile, "Proc-IMMU", (interface Server;
-                                        interface Put request = itlb.request;
-                                        interface Get response = itlb.response;
-                                    endinterface));
-            interface Server ifetch = fprintTrace(tracefile, "Proc-ICache", icache);
-            interface Server dvat = fprintTrace(tracefile, "Proc-DMMU", (interface Server;
-                                        interface Put request = dtlb.request;
-                                        interface Get response = dtlb.response;
-                                    endinterface));
-            interface Server dmem = fprintTrace(tracefile, "Proc-DMem", dmem);
-            interface Server fence;
-                interface Put request;
-                    method Action put(FenceReq f);
+            interface ServerPort ivat = (interface ServerPort;
+                                        interface InputPort request = itlb.request;
+                                        interface OutputPort response = itlb.response;
+                                    endinterface);
+            interface ServerPort ifetch = imem_32bit;
+            interface ServerPort dvat = (interface ServerPort;
+                                        interface InputPort request = dtlb.request;
+                                        interface OutputPort response = dtlb.response;
+                                    endinterface);
+            interface ServerPort dmem = dmem;
+            interface ServerPort fence;
+                interface InputPort request;
+                    method Action enq(FenceReq f);
                         noAction;
                     endmethod
+                    method Bool canEnq;
+                        return True;
+                    endmethod
                 endinterface
-                interface Get response;
-                    method ActionValue#(FenceResp) get;
+                interface OutputPort response;
+                    method FenceResp first;
                         return ?;
+                    endmethod
+                    method Action deq;
+                        noAction;
+                    endmethod
+                    method Bool canDeq;
+                        return True;
                     endmethod
                 endinterface
             endinterface
-            method Action updateVMInfoI(VMInfo vmI);
+            method Action updateVMInfoI(VMInfo#(xlen) vmI);
                 itlb.updateVMInfo(vmI);
             endmethod
-            method Action updateVMInfoD(VMInfo vmD);
+            method Action updateVMInfoD(VMInfo#(xlen) vmD);
                 dtlb.updateVMInfo(vmD);
             endmethod
         endinterface);
     interface Vector core = onecore;
-    interface Client cachedMemory = mainMemoryClient;
-    interface Client uncachedMemory = uncachedMemClient;
+    interface ClientPort cachedMemory = mainMemoryClient;
+    interface ClientPort uncachedMemory = uncachedMemClient;
     interface GenericMemServer extMemory = extMemServer;
 endmodule

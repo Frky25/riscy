@@ -194,28 +194,35 @@ typedef enum {
     D   = 2'b11
 } RVMemSize deriving (Bits, Eq, FShow);
 
-`ifdef CONFIG_RV64
-function DataByteEn toDataByteEn(RVMemSize size);
-    return unpack(case (size)
-            B:       8'b00000001;
-            H:       8'b00000011;
-            W:       8'b00001111;
-            D:       8'b11111111;
-            default: 8'b00000000;
-        endcase);
-endfunction
-`else
-// rv32
-function DataByteEn toDataByteEn(RVMemSize size);
-    return unpack(case (size)
-            B:       4'b0001;
-            H:       4'b0011;
-            W:       4'b1111;
-            // D is illegal
-            default: 4'b0000;
-        endcase);
-endfunction
-`endif
+typeclass ToDataByteEn#(numeric type n);
+    function Bit#(n) toDataByteEn(RVMemSize size);
+endtypeclass
+
+// RV32 Instance
+instance ToDataByteEn#(4);
+    function Bit#(4) toDataByteEn(RVMemSize size);
+        return (case (size)
+                B:       4'b0001;
+                H:       4'b0011;
+                W:       4'b1111;
+                // D is illegal
+                default: 4'b0000;
+            endcase);
+    endfunction
+endinstance
+
+// RV64 Instance
+instance ToDataByteEn#(8);
+    function Bit#(8) toDataByteEn(RVMemSize size);
+        return (case (size)
+                B:       8'b00000001;
+                H:       8'b00000011;
+                W:       8'b00001111;
+                D:       8'b11111111;
+                default: 8'b00000000;
+            endcase);
+    endfunction
+endinstance
 
 function DataByteEn toPermutedDataByteEn(RVMemSize size, DataByteSel addrLSB);
     return toDataByteEn(size) << addrLSB;
@@ -771,16 +778,16 @@ typedef struct {
 // } DecodedInst deriving (Bits, Eq, FShow);
 
 typedef struct {
-    Data                    data;
+    Bit#(xlen)              data;
     Bit#(5)                 fflags;
-    Addr                    vaddr;
-    Addr                    paddr;
+    Bit#(xlen)              vaddr;
+    Bit#(xlen)              paddr;
     ControlFlow             controlFlow;
     Maybe#(ExceptionCause)  cause;
-} FullResult deriving (Bits, Eq, FShow);
+} FullResult#(numeric type xlen) deriving (Bits, Eq, FShow);
 
-typeclass FullResultSubset#(type t);
-    function FullResult updateFullResult(t x, FullResult full_result);
+typeclass FullResultSubset#(type t, numeric type xlen);
+    function FullResult#(xlen) updateFullResult(t x, FullResult#(xlen) full_result);
 endtypeclass
 instance DefaultValue#(ControlFlow);
     function ControlFlow defaultValue = ControlFlow{pc: 0,
@@ -788,29 +795,29 @@ instance DefaultValue#(ControlFlow);
                                                     taken: False,
                                                     mispredict: False};
 endinstance
-instance DefaultValue#(FullResult);
-    function FullResult defaultValue = FullResult{  data: 0,
+instance DefaultValue#(FullResult#(xlen));
+    function FullResult#(xlen) defaultValue = FullResult{  data: 0,
                                                     fflags: 0,
                                                     vaddr: 0,
                                                     paddr: 0,
                                                     controlFlow: defaultValue,
                                                     cause: tagged Invalid};
 endinstance
-function FullResult toFullResult(t x) provisos (FullResultSubset#(t));
+function FullResult#(xlen) toFullResult(t x) provisos (FullResultSubset#(t, xlen));
     return updateFullResult(x, defaultValue);
 endfunction
 
 typedef struct {
-    Bit#(2) prv;
-    Asid    asid;
-    Bit#(5) vm;
-    Bool    mxr;
-    Bool    pum;
-    Addr    base;
-    Addr    bound;
-} VMInfo deriving (Bits, Eq, FShow);
-instance DefaultValue#(VMInfo);
-    function VMInfo defaultValue = VMInfo {prv: prvM, asid: 0, vm: 0, mxr: False, pum: False, base: 0, bound: 0};
+    Bit#(2)    prv;
+    Asid       asid;
+    Bit#(5)    vm;
+    Bool       mxr;
+    Bool       pum;
+    Bit#(xlen) base;
+    Bit#(xlen) bound;
+} VMInfo#(numeric type xlen) deriving (Bits, Eq, FShow);
+instance DefaultValue#(VMInfo#(xlen));
+    function VMInfo#(xlen) defaultValue = VMInfo {prv: prvM, asid: 0, vm: 0, mxr: False, pum: False, base: 0, bound: 0};
 endinstance
 
 // Instead of making PMAs generic (like a massive struct), we are adding named

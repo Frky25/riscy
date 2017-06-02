@@ -1,5 +1,5 @@
 
-// Copyright (c) 2016 Massachusetts Institute of Technology
+// Copyright (c) 2016, 2017 Massachusetts Institute of Technology
 
 // Permission is hereby granted, free of charge, to any person
 // obtaining a copy of this software and associated documentation
@@ -24,13 +24,17 @@
 import ClientServer::*;
 import Connectable::*;
 import DefaultValue::*;
-import FIFO::*;
 import GetPut::*;
 import Vector::*;
 
+import ClockGate::*;
+import FIFOG::*;
+import MemUtil::*;
+import Port::*;
+
 import Abstraction::*;
 import RegUtil::*;
-import RVRFile::*;
+import RVRegFile::*;
 import RVCsrFile::*;
 import RVExec::*;
 import RVFpu::*;
@@ -43,20 +47,23 @@ import RVControl::*;
 import RVDecode::*;
 import RVMemory::*;
 
-// This interface is the combination of FrontEnd and BackEnd
-interface Core;
-    method Action start(Addr startPc);
-    method Action stop;
+import MemorySystem::*;
 
-    method ActionValue#(VerificationPacket) getVerificationPacket;
-    method ActionValue#(VMInfo) updateVMInfoI;
-    method ActionValue#(VMInfo) updateVMInfoD;
+// This interface is the combination of FrontEnd and BackEnd
+interface Core#(numeric type xlen);
+    method Action start(Bit#(xlen) startPc);
+    method Action stop;
+    method Action stallPipeline(Bool stall);
+
+    method Maybe#(VerificationPacket) currVerificationPacket;
+    method ActionValue#(VMInfo#(xlen)) updateVMInfoI;
+    method ActionValue#(VMInfo#(xlen)) updateVMInfoD;
 
     interface Client#(FenceReq, FenceResp) fence;
 endinterface
 
-instance Connectable#(Core, MemorySystem);
-    module mkConnection#(Core core, MemorySystem mem)(Empty);
+instance Connectable#(Core#(xlen), MemorySystem#(xlen));
+    module mkConnection#(Core#(xlen) core, MemorySystem#(xlen) mem)(Empty);
         mkConnection(core.fence, mem.fence);
         mkConnection(toGet(core.updateVMInfoI), toPut(mem.updateVMInfoI));
         mkConnection(toGet(core.updateVMInfoD), toPut(mem.updateVMInfoD));
@@ -77,23 +84,29 @@ typedef enum {
 } ProcState deriving (Bits, Eq, FShow);
 
 module mkMulticycleCore#(
-        Server#(RVIMMUReq, RVIMMUResp) ivat,
-        Server#(RVIMemReq, RVIMemResp) ifetch,
-        Server#(RVDMMUReq, RVDMMUResp) dvat,
-        Server#(RVDMemReq, RVDMemResp) dmem,
+        ServerPort#(RVIMMUReq#(xlen), RVIMMUResp#(xlen)) ivat,
+        // ServerPort#(RVIMemReq, RVIMemResp) ifetch,
+        ReadOnlyMemServerPort#(xlen, 2) ifetch,
+        ServerPort#(RVDMMUReq#(xlen), RVDMMUResp#(xlen)) dvat,
+        // ServerPort#(RVDMemReq, RVDMemResp) dmem,
+        AtomicMemServerPort#(xlen, TLog#(TDiv#(xlen,8))) dmem,
         Bool ipi,
         Bool timerInterrupt,
         Data timer,
         Bool externalInterrupt,
         Data hartID
     )
-        (Core);
-    let verbose = False;
+        (Core#(xlen)) provisos (NumAlias#(xlen, XLEN));
     File fout = stdout;
 
-    ArchRFile rf <- mkArchRFile;
-    RVCsrFile csrf <- mkRVCsrFile(hartID, timer, timerInterrupt, ipi, externalInterrupt);
-    MulDivExec mulDiv <- mkBoothRoughMulDivExec;
+    // This is used in a few places for configuring the core
+    RiscVISASubset misa = defaultValue;
+
+    Reg#(Bool) stallReg <- mkReg(False);
+
+    RVRegFile#(xlen) rf <- mkRVRegFile(misa.f);
+    RVCsrFile#(xlen) csrf <- mkRVCsrFile(hartID, timer, timerInterrupt, ipi, externalInterrupt);
+    MulDivExec#(xlen) mulDiv <- mkBoothRoughMulDivExec;
     FpuExec fpu <- mkFpuExecPipeline;
 
     Reg#(Bool) running <- mkReg(False);
@@ -103,7 +116,7 @@ module mkMulticycleCore#(
     Reg#(Maybe#(ExceptionCause)) exception <- mkReg(tagged Invalid);
     Reg#(Instruction) inst <- mkReg(0);
     Reg#(RVDecodedInst) dInst <- mkReg(unpack(0));
-    Reg#(FrontEndCsrs) csrState <- mkReadOnlyReg( FrontEndCsrs { vmI: csrf.vmI, state: csrf.csrState } );
+    Reg#(FrontEndCsrs#(xlen)) csrState <- mkReadOnlyReg( FrontEndCsrs { vmI: csrf.vmI, state: csrf.csrState } );
 
     Reg#(Data) rVal1 <- mkReg(0);
     Reg#(Data) rVal2 <- mkReg(0);
@@ -112,11 +125,11 @@ module mkMulticycleCore#(
     Reg#(Data) addr <- mkReg(0);
     Reg#(Data) nextPc <- mkReg(0);
 
-    FIFO#(VerificationPacket) verificationPackets <- mkFIFO1;
+    FIFOG#(VerificationPacket) verificationPackets <- mkLFIFOG;
 
     rule doInstMMU(running && state == IMMU);
         // request address translation from MMU
-        ivat.request.put(pc);
+        ivat.request.enq(pc);
         // reset states
         inst <= unpack(0);
         dInst <= unpack(0);
@@ -128,13 +141,14 @@ module mkMulticycleCore#(
     rule doInstFetch(state == IF);
         // I wanted notation like this:
         // let {addr: .phyPc, exception: .exMMU} = mmuResp.first;
-        let resp <- ivat.response.get;
+        let resp = ivat.response.first;
+        ivat.response.deq;
         let phyPc = resp.addr;
         let exMMU = resp.exception;
 
         if (!isValid(exMMU)) begin
             // no translation exception
-            ifetch.request.put(phyPc);
+            ifetch.request.enq(ReadOnlyMemReq{ addr: phyPc });
             // go to decode stage
             state <= Dec;
         end else begin
@@ -146,9 +160,10 @@ module mkMulticycleCore#(
     endrule
 
     rule doDecode(state == Dec);
-        let fInst <- ifetch.response.get;
+        let fInst = ifetch.response.first.data;
+        ifetch.response.deq;
 
-        let decInst = decodeInst(fInst);
+        let decInst = decodeInst(misa.rv64, misa.m, misa.a, misa.f, misa.d, fInst);
 
         if (decInst matches tagged Valid .validDInst) begin
             // Legal instruction
@@ -173,7 +188,7 @@ module mkMulticycleCore#(
         let execResult = basicExec(dInst, rVal1, rVal2, pc);
 
         case (dInst.execFunc) matches
-            tagged Mem    .memInst:    dvat.request.put(RVDMMUReq {addr: execResult.addr, size: memInst.size, op: (memInst.op matches tagged Mem .memOp ? memOp : St)});
+            tagged Mem    .memInst:    dvat.request.enq(RVDMMUReq {addr: execResult.addr, size: memInst.size, op: (memInst.op matches tagged Mem .memOp ? memOp : St)});
             tagged MulDiv .mulDivInst: mulDiv.exec(mulDivInst, rVal1, rVal2);
             tagged Fpu    .fpuInst:    fpu.exec(fpuInst, getInstFields(inst).rm, rVal1, rVal2, rVal3);
         endcase
@@ -186,18 +201,48 @@ module mkMulticycleCore#(
     endrule
 
     rule doMem(state == Mem);
-        let resp <- dvat.response.get;
+        let resp = dvat.response.first;
+        dvat.response.deq;
         let pAddr = resp.addr;
         let exMMU = resp.exception;
 
         // TODO: make this type safe! get rid of .Mem accesses to tagged union
         if (!isValid(exMMU)) begin
-            dmem.request.put( RVDMemReq {
-                    op: dInst.execFunc.Mem.op,
-                    size: dInst.execFunc.Mem.size,
-                    isUnsigned: dInst.execFunc.Mem.isUnsigned,
+            // physical addr should have same byte offset as virtual addr
+            Bit#(TLog#(TDiv#(xlen,8))) offset = truncate(addr);
+            Bit#(TDiv#(xlen,8)) byteen = (case(dInst.execFunc.Mem.size)
+                        B: 'b0001;
+                        H: 'b0011;
+                        W: 'b1111;
+                        D: '1;
+                    endcase) << offset;
+            AtomicMemOp atomic_op = None;
+            if (dInst.execFunc.Mem.op matches tagged Amo .rvamo) begin
+                atomic_op = (case (rvamo)
+                        Swap:    Swap;
+                        Add:     Add;
+                        Xor:     Xor;
+                        And:     And;
+                        Or:      Or;
+                        Min:     Min;
+                        Max:     Max;
+                        Minu:    Minu;
+                        Maxu:    Maxu;
+                        default: None;
+                    endcase);
+            end
+            dmem.request.enq( AtomicMemReq {
+                    write_en: ((dInst.execFunc.Mem.op == tagged Mem Ld) ? 0 : byteen),
+                    atomic_op: atomic_op,
                     addr: pAddr,
-                    data: data } );
+                    data: (data << {offset, 3'b0})
+                } );
+            //dmem.request.enq( RVDMemReq {
+            //        op: dInst.execFunc.Mem.op,
+            //        size: dInst.execFunc.Mem.size,
+            //        isUnsigned: dInst.execFunc.Mem.isUnsigned,
+            //        addr: pAddr,
+            //        data: data } );
             state <= WB;
         end else begin
             exception <= exMMU;
@@ -205,7 +250,7 @@ module mkMulticycleCore#(
         end
     endrule
 
-    rule doWB(state == WB);
+    rule doWB(!stallReg && state == WB);
         let dataWb = data;
         let addrWb = addr;
         let nextPcWb = nextPc;
@@ -218,16 +263,25 @@ module mkMulticycleCore#(
                     mulDiv.result_deq;
                 end
             tagged Fpu .*: begin
-                    let fpuResult = toFullResult(fpu.result_data);
-                    dataWb = fpuResult.data;
-                    fflagsWb = fpuResult.fflags;
+                    dataWb = fpu.result_data.data;
+                    fflagsWb = fpu.result_data.fflags;
                     fpu.result_deq;
                 end
             tagged Mem .memInst:
                 begin
                     if (getsResponse(memInst.op)) begin
-                        dataWb <- dmem.response.get;
+                        dataWb = dmem.response.first.data;
+                        Bit#(TLog#(TDiv#(xlen,8))) offset = truncate(addr);
+                        dataWb = dataWb >> {offset, 3'b0};
+                        let extendFunc = memInst.isUnsigned ? zeroExtend : signExtend;
+                        dataWb = (case(memInst.size)
+                                    B: extendFunc(dataWb[7:0]);
+                                    H: extendFunc(dataWb[15:0]);
+                                    W: extendFunc(dataWb[31:0]);
+                                    default: dataWb;
+                                endcase);
                     end
+                    dmem.response.deq;
                 end
         endcase
 
@@ -322,7 +376,7 @@ module mkMulticycleCore#(
         end
     endrule
 
-    rule doTrap(state == Trap);
+    rule doTrap(!stallReg && state == Trap);
         // TODO: move this to WB
         let csrfResult <- csrf.wr(
                 pc,
@@ -391,28 +445,37 @@ module mkMulticycleCore#(
         state <= IMMU;
     endrule
 
+    rule deqVerificationPacket(!stallReg);
+        verificationPackets.deq;
+    endrule
+
     method Action start(Addr startPc);
         running <= True;
         pc <= startPc;
         state <= IMMU;
         csrState <= defaultValue;
-        if (verbose) $fdisplay(fout, "[frontend] starting from pc = 0x%08x", startPc);
+        stallReg <= False;
     endmethod
     method Action stop;
         running <= False;
         state <= Wait;
     endmethod
-
-    method ActionValue#(VerificationPacket) getVerificationPacket;
-        let verificationPacket = verificationPackets.first;
-        verificationPackets.deq;
-        return verificationPacket;
+    method Action stallPipeline(Bool stall);
+        stallReg <= stall;
     endmethod
 
-    method ActionValue#(VMInfo) updateVMInfoI;
+    method Maybe#(VerificationPacket) currVerificationPacket;
+        if (verificationPackets.canDeq) begin
+            return tagged Valid verificationPackets.first;
+        end else begin
+            return tagged Invalid;
+        end
+    endmethod
+
+    method ActionValue#(VMInfo#(xlen)) updateVMInfoI;
         return csrf.vmI;
     endmethod
-    method ActionValue#(VMInfo) updateVMInfoD;
+    method ActionValue#(VMInfo#(xlen)) updateVMInfoD;
         return csrf.vmD;
     endmethod
 
